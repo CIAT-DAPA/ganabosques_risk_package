@@ -35,5 +35,3 @@ result = calculate_risk_direct(
 ```bash
 python -m unittest discover tests
 ```
-
-MIT License
