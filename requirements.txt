@@ -1,0 +1,6 @@
+pandas>=1.5
+geopandas>=0.13
+shapely>=2.0
+rasterio>=1.3
+numpy>=1.22
+mongomock>=4.1
