@@ -11,15 +11,15 @@ import rasterio.mask
 import numpy as np
 import pandas as pd
 
-def calculate_risk_direct(df_predios, raster_deforestacion_path, shp_areas_protegidas_path, shp_frontera_agro_path):
+def calculate_risk_direct(df_plots, raster_deforestation_path, shp_protected_areas_path, shp_farming_areas_path):
     """
     Calculate direct risk for each property according to MRV protocol.
 
     Parameters:
-    - df_predios: GeoDataFrame with 'geometry' column representing the buffer areas
-    - raster_deforestacion_path: path to the deforestation raster (GeoTIFF)
-    - shp_areas_protegidas_path: path to the protected areas shapefile
-    - shp_frontera_agro_path: path to the agricultural frontier shapefile
+    - df_plots: GeoDataFrame with 'geometry' column representing the buffer areas
+    - raster_deforestation_path: path to the deforestation raster (GeoTIFF)
+    - shp_protected_areas_path: path to the protected areas shapefile
+    - shp_farming_areas_path: path to the agricultural frontier shapefile
 
     Returns:
     - DataFrame with: hectares_deforested, proportion_deforested,
@@ -27,20 +27,21 @@ def calculate_risk_direct(df_predios, raster_deforestacion_path, shp_areas_prote
                       distance_to_agro_frontier, and risk level
     """
 
-    if not isinstance(df_predios, gpd.GeoDataFrame):
-        raise ValueError("df_predios must be a GeoDataFrame with a 'geometry' column")
+    # Validate the column geometry in the df_
+    if not isinstance(df_plots, gpd.GeoDataFrame):
+        raise ValueError("df_plots must be a GeoDataFrame with a 'geometry' column")
 
-    gdf_protegidas = gpd.read_file(shp_areas_protegidas_path).to_crs(df_predios.crs)
-    gdf_frontera = gpd.read_file(shp_frontera_agro_path).to_crs(df_predios.crs)
+    gdf_protegidas = gpd.read_file(shp_protected_areas_path).to_crs(df_plots.crs)
+    gdf_frontera = gpd.read_file(shp_farming_areas_path).to_crs(df_plots.crs)
 
     results = []
 
-    with rasterio.open(raster_deforestacion_path) as src:
-        df_predios_proj = df_predios.to_crs(src.crs)
+    with rasterio.open(raster_deforestation_path) as src:
+        df_plots_proj = df_plots.to_crs(src.crs)
         gdf_protegidas_proj = gdf_protegidas.to_crs(src.crs)
         gdf_frontera_proj = gdf_frontera.to_crs(src.crs)
 
-        for idx, row in df_predios_proj.iterrows():
+        for idx, row in df_plots_proj.iterrows():
             geom = row.geometry
             area_total_ha = geom.area / 10000.0
 

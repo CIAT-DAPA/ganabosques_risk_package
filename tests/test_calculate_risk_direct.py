@@ -8,7 +8,7 @@ class TestCalculateRiskDirect(unittest.TestCase):
     def setUp(self):
         # Crear un GeoDataFrame ficticio con un polígono cuadrado
         self.polygon = Polygon([(0, 0), (0, 1000), (1000, 1000), (1000, 0)])
-        self.df_predios = gpd.GeoDataFrame({
+        self.df_plots = gpd.GeoDataFrame({
             "id": [1],
             "geometry": [self.polygon]
         }, crs="EPSG:3857")
@@ -25,9 +25,9 @@ class TestCalculateRiskDirect(unittest.TestCase):
 
     def test_placeholder_geometry(self):
         # Comentario: no se prueba la lógica espacial aquí, solo aseguramos estructura general
-        self.assertIn("geometry", self.df_predios.columns)
-        self.assertEqual(len(self.df_predios), 1)
-        self.assertTrue(self.df_predios.geometry.iloc[0].is_valid)
+        self.assertIn("geometry", self.df_plots.columns)
+        self.assertEqual(len(self.df_plots), 1)
+        self.assertTrue(self.df_plots.geometry.iloc[0].is_valid)
 
 # Ejecutar solo si este archivo se ejecuta directamente
 if __name__ == "__main__":
