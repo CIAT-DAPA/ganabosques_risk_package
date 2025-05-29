@@ -15,13 +15,13 @@ class TestCalculateRiskDirect(unittest.TestCase):
 
         # Archivos falsos que no serán cargados (solo para prueba de errores)
         self.raster_path = "fake_raster.tif"
-        self.shp_protegidas = "fake_protected.shp"
-        self.shp_frontera = "fake_frontera.shp"
+        self.shp_protected = "fake_protected.shp"
+        self.shp_frontier = "fake_frontier.shp"
 
     def test_error_with_non_geodataframe(self):
         # Comentario: prueba que lanza error si no se pasa un GeoDataFrame
         with self.assertRaises(ValueError):
-            calculate_risk_direct(pd.DataFrame(), self.raster_path, self.shp_protegidas, self.shp_frontera)
+            calculate_risk_direct(pd.DataFrame(), self.raster_path, self.shp_protected, self.shp_frontier)
 
     def test_placeholder_geometry(self):
         # Comentario: no se prueba la lógica espacial aquí, solo aseguramos estructura general
