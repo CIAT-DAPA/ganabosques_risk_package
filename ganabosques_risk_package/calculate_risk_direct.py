@@ -11,6 +11,26 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from enum import Enum
+
+class RiskLevel(Enum):
+    """
+    Enum: RiskLevel
+    Description:
+        Represents the categorical levels of direct deforestation risk
+        according to the MRV protocol used in the Ganabosques system.
+
+    Values:
+        - LOW: Low risk of deforestation.
+        - MEDIUM: Medium risk of deforestation.
+        - HIGH: High risk of deforestation.
+        - NO_RISK: No risk of deforestation.
+    """
+    LOW = "BAJO"
+    MEDIUM = "MEDIO"
+    HIGH = "ALTO"
+    NO_RISK = "SIN RIESGO"
+
 def count_deforestation_in_ring(src, geometry, deforested_value):
     """
     Count number of deforestation pixels (value == deforested_value) in a given geometry.
@@ -103,17 +123,13 @@ def calculate_risk_direct(df_plots, raster_deforestation_path, shp_protected_are
             in_agro_frontier = gdf_frontier_proj.intersects(geom).any()
 
             # Risk classification logic
-            risk_level = 0  # Default fallback
-            risk_level_label = "NO"
+            risk_level = RiskLevel.NO_RISK  # Default fallback
             if (hectares_deforested > 0 or deforestation_0_500m > 0) and protected_within_500:
-                risk_level = 3
-                risk_level_label = "ALTO"
+                risk_level = RiskLevel.HIGH
             elif deforestation_500_2000m > 0 and protected_500_2000:
-                risk_level = 2
-                risk_level_label = "MEDIO"
+                risk_level = RiskLevel.MEDIUM
             elif deforestation_2000_5000m > 0 and protected_over_2000 and in_agro_frontier:
-                risk_level = 1
-                risk_level_label = "BAJO"
+                risk_level = RiskLevel.LOW
 
 
             # Store result for this plot
@@ -124,8 +140,16 @@ def calculate_risk_direct(df_plots, raster_deforestation_path, shp_protected_are
                 "deforested_distance_to": min_dist_deforest,
                 "protected_area_distance_to": dist_protected,
                 "agro_frontier_distance_to": dist_frontier,
-                "risk_direct_level": risk_level,
-                "risk_direct_level_label": risk_level_label
+                "risk_direct_level": risk_level.name,
+                "risk_direct_level_label": risk_level.value,
+                "risk_context": {
+                    "deforestation_0_500m": deforestation_0_500m,
+                    "deforestation_500_2000m": deforestation_500_2000m,
+                    "deforestation_2000_5000m": deforestation_2000_5000m,
+                    "protected_within_500": protected_within_500,
+                    "protected_500_2000": protected_500_2000,
+                    "protected_over_2000": protected_over_2000
+                }
             })
 
     return pd.DataFrame(results)

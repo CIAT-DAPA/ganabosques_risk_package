@@ -8,7 +8,7 @@ setup(
     author_email="h.sotelo@cgiar.org",
     packages=find_packages(),
     install_requires=[
-        "pandas", "geopandas", "shapely", "rasterio", "numpy", "tqdm"
+        "pandas", "geopandas", "shapely", "rasterio", "numpy", "tqdm", "fiona"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
