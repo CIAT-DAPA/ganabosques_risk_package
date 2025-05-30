@@ -5,26 +5,13 @@ Description: Calculates entry and exit movement risks for farms based on the MRV
 
 import pandas as pd
 from tqdm import tqdm
-from ganabosques_risk_package.risk_level import RiskLevel
+from ganabosques_risk_package.risk_level import RiskLevel, classify_risk
 
 def compute_average(values):
     """
     Calculate the average of a list of numeric values.
     """
     return sum(values) / len(values) if values else 0
-
-def classify_risk(score):
-    """
-    Classify a numeric risk score into one of the RiskLevel categories.
-    """
-    if score >= 2.5:
-        return RiskLevel.HIGH
-    elif score >= 1.5:
-        return RiskLevel.MEDIUM
-    elif score > 0:
-        return RiskLevel.LOW
-    else:
-        return RiskLevel.NO_RISK
 
 def calculate_risk_movement(df_plots_risk, df_movement):
     """
@@ -64,7 +51,7 @@ def calculate_risk_movement(df_plots_risk, df_movement):
     results = []
 
     # Iterate over each plot and calculate entry/exit risk scores
-    for plot_id in tqdm(df_plots_risk['id'], desc="Calculating movement risk"):
+    for plot_id in tqdm(df_plots_risk['id'], desc="Calculating movement risk" + str(len(df_plots_risk)) + " plots"):
 
         # Find all incoming and outgoing movements for the plot
         in_raw = df_movement[df_movement['destination_id'] == plot_id]['origen_id']

@@ -17,3 +17,16 @@ class RiskLevel(Enum):
     MEDIUM = 2
     LOW = 1
     NO_RISK = 0
+
+def classify_risk(score):
+    """
+    Classify a numeric risk score into one of the RiskLevel categories.
+    """
+    if score >= 2.5:
+        return RiskLevel.HIGH
+    elif score >= 1.5:
+        return RiskLevel.MEDIUM
+    elif score > 0:
+        return RiskLevel.LOW
+    else:
+        return RiskLevel.NO_RISK
