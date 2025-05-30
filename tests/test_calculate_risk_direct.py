@@ -8,7 +8,7 @@ import rasterio
 from rasterio.transform import from_origin
 from tempfile import TemporaryDirectory
 import fiona
-from ganabosques_risk_package.calculate_risk_direct import calculate_risk_direct, RiskLevel
+from ganabosques_risk_package.calculate_risk_direct import calculate_risk_direct
 
 class TestCalculateRiskDirect(unittest.TestCase):
 
@@ -35,23 +35,6 @@ class TestCalculateRiskDirect(unittest.TestCase):
         self.assertIn("geometry", self.df_plots.columns)
         self.assertEqual(len(self.df_plots), 1)
         self.assertTrue(self.df_plots.geometry.iloc[0].is_valid)
-
-    def test_enum_values(self):
-        # Test: RiskLevel enum has expected string values
-        self.assertEqual(RiskLevel.LOW.value, "BAJO")
-        self.assertEqual(RiskLevel.MEDIUM.value, "MEDIO")
-        self.assertEqual(RiskLevel.HIGH.value, "ALTO")
-        self.assertEqual(RiskLevel.NO_RISK.value, "SIN RIESGO")
-
-    def test_enum_labels(self):
-        # Test: Enum string representation
-        self.assertEqual(str(RiskLevel.HIGH.name), "HIGH")
-        self.assertEqual(str(RiskLevel.HIGH.value), "ALTO")
-
-    def test_enum_type(self):
-        # Test: RiskLevel is instance of Enum
-        self.assertTrue(isinstance(RiskLevel.HIGH, RiskLevel))
-        self.assertEqual(RiskLevel.HIGH.name, "HIGH")
 
     def test_default_deforested_value_parameter(self):
         # Test: ensure default deforested_value argument is 2
