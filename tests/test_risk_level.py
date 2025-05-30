@@ -11,10 +11,10 @@ class TestRiskLevelEnum(unittest.TestCase):
 
     def test_enum_values_are_correct(self):
         # Test: RiskLevel values match expected Spanish labels
-        self.assertEqual(RiskLevel.LOW.value, "BAJO")
-        self.assertEqual(RiskLevel.MEDIUM.value, "MEDIO")
-        self.assertEqual(RiskLevel.HIGH.value, "ALTO")
-        self.assertEqual(RiskLevel.NO_RISK.value, "SIN RIESGO")
+        self.assertEqual(RiskLevel.LOW.value, 1)
+        self.assertEqual(RiskLevel.MEDIUM.value, 2)
+        self.assertEqual(RiskLevel.HIGH.value, 3)
+        self.assertEqual(RiskLevel.NO_RISK.value, 0)
 
     def test_enum_names(self):
         # Test: Enum names are in uppercase
