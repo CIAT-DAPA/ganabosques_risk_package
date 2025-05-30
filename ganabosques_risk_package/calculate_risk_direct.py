@@ -122,8 +122,9 @@ def calculate_risk_direct(df_plots, raster_deforestation_path, shp_protected_are
                 "deforested_distance_to": min_dist_deforest,
                 "protected_area_distance_to": dist_protected,
                 "agro_frontier_distance_to": dist_frontier,
-                "risk_direct_level": risk_level.name,
-                "risk_direct_level_label": risk_level.value,
+                "risk_direct_level": risk_level,
+                "risk_direct_level_value": risk_level.value,
+                "risk_direct_level_label": risk_level.name,
                 "risk_context": {
                     "deforestation_0_500m": deforestation_0_500m,
                     "deforestation_500_2000m": deforestation_500_2000m,

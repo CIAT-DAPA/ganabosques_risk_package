@@ -13,7 +13,7 @@ class RiskLevel(Enum):
         - HIGH: High risk of deforestation.
         - NO_RISK: No risk of deforestation.
     """
-    LOW = "BAJO"
-    MEDIUM = "MEDIO"
-    HIGH = "ALTO"
-    NO_RISK = "SIN RIESGO"
+    HIGH = 3
+    MEDIUM = 2
+    LOW = 1
+    NO_RISK = 0

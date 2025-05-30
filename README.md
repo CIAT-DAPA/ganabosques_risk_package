@@ -11,7 +11,7 @@ pip install git+https://github.com/your-org/ganabosques_risk_package.git
 ## Modules
 
 - `calculate_risk_direct(df_plots, raster_deforestation, shp_protected_areas, shp_farming_areas)`: Calculate direct risk per property.
-- `calculate_risk_movement(predio_id, movilizaciones_df)`: Calculate entry and exit movement risks.
+- `calculate_risk_movement(plot_id, movilizaciones_df)`: Calculate entry and exit movement risks.
 - `calculate_risk_total(df_plots)`: Calculate total risk from direct and movement risks.
 - `calculate_risk_enterprise(empresas_df, proveedores_df)`: Aggregate risk per enterprise.
 - `calculate_risk_administrative(predios_df)`: Aggregate risk by administrative units (e.g., vereda).

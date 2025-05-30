@@ -12,7 +12,7 @@ def calculate_risk_enterprise(empresas_df, proveedores_df):
     Parameters:
     - empresas_df: DataFrame with column 'empresa_id'
     - proveedores_df: DataFrame with columns:
-        ['empresa_id', 'predio_id', 'risk_direct_level', 'riesgo_total']
+        ['empresa_id', 'plot_id', 'risk_direct_level', 'riesgo_total']
 
     Returns:
     - DataFrame with one row per empresa and risk classification + indicators
