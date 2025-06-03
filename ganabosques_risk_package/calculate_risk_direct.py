@@ -106,11 +106,11 @@ def calculate_risk_direct(df_plots, raster_deforestation_path, shp_protected_are
 
             # Risk classification logic
             risk_level = RiskLevel.NO_RISK  # Default fallback
-            if (hectares_deforested > 0 or deforestation_0_500m > 0) and protected_within_500:
+            if (hectares_deforested > 0 or deforestation_0_500m > 0) or protected_within_500:
                 risk_level = RiskLevel.HIGH
-            elif deforestation_500_2000m > 0 and protected_500_2000:
+            elif deforestation_500_2000m > 0 or protected_500_2000:
                 risk_level = RiskLevel.MEDIUM
-            elif deforestation_2000_5000m > 0 and protected_over_2000 and in_agro_frontier:
+            elif deforestation_2000_5000m > 0 or protected_over_2000 or in_agro_frontier:
                 risk_level = RiskLevel.LOW
 
 

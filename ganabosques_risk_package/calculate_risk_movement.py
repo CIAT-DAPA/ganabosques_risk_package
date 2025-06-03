@@ -51,7 +51,7 @@ def calculate_risk_movement(df_plots_risk, df_movement):
     results = []
 
     # Iterate over each plot and calculate entry/exit risk scores
-    for plot_id in tqdm(df_plots_risk['id'], desc="Calculating movement risk" + str(len(df_plots_risk)) + " plots"):
+    for plot_id in tqdm(df_plots_risk['id'], desc="Calculating movement risk " + str(len(df_plots_risk)) + " plots"):
 
         # Find all incoming and outgoing movements for the plot
         in_raw = df_movement[df_movement['destination_id'] == plot_id]['origen_id']
