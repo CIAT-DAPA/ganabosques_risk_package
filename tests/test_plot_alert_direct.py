@@ -20,7 +20,7 @@ from ganabosques_risk_package.plot_alert_direct import (
     _intersect_raster_deforestation,
     _intersect_area_layer,
     _process_one,
-    compute_plot_overlays,
+    alert_direct,
 )
 
 
@@ -241,16 +241,16 @@ class TestPlotOverlays(unittest.TestCase):
             shm.unlink()
 
     # -------------------------------------------
-    # End-to-end test for compute_plot_overlays
+    # End-to-end test for alert_direct
     # -------------------------------------------
 
-    def test_compute_plot_overlays_end_to_end(self):
+    def test_alert_direct_end_to_end(self):
         """
         Purpose:
             Validate full pipeline with actual files on disk:
             - Write GeoTIFF raster and GeoJSON vector layers to temp dir.
             - Build plots GeoDataFrame with one polygon.
-            - Run compute_plot_overlays(n_workers=1) to avoid multiprocessing flakiness.
+            - Run alert_direct(n_workers=1) to avoid multiprocessing flakiness.
             - Check columns and key numeric results, including 'alert_direct'.
 
         Branches/ifs covered:
@@ -294,7 +294,7 @@ class TestPlotOverlays(unittest.TestCase):
             plots = gpd.GeoDataFrame({"id": ["plot-1"], "geometry": [self.plot_poly]}, crs=None)
 
             # --- Run the function (single worker for simplicity/testing) ---
-            df = compute_plot_overlays(
+            df = alert_direct(
                 plots=plots,
                 deforestation=str(raster_path),
                 protected_areas=str(protected_path),

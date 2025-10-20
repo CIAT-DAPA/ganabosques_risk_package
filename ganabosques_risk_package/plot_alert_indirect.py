@@ -82,11 +82,14 @@ def _build_new_dataframe(
     mv = movement_df.reset_index(drop=True).copy()
 
     # Origin side merge
-    mv = mv.merge(alert_direct_df, how="left", left_on="origen_id", right_on="id", suffixes="_origin")
+    #mv = mv.merge(alert_direct_df, how="left", left_on="origen_id", right_on="id", suffixes="_origin")
+    mv = mv.merge(alert_direct_df, how="left", left_on="origen_id", right_on="id", suffixes=("_origin", "_x"))
 
     # Destination side merge
-    mv = mv.merge(alert_direct_df, how="left", left_on="destination_id", right_on="id", suffixes="_destination")
+    #mv = mv.merge(alert_direct_df, how="left", left_on="destination_id", right_on="id", suffixes="_destination")
+    mv = mv.merge(alert_direct_df, how="left", left_on="destination_id", right_on="id", suffixes=("_destination", "_y"))
 
+    print(mv.columns)
     mv["alert_direct_origen"] = mv["alert_direct_origen"].fillna(False).astype(bool)
     mv["alert_direct_destination"] = mv["alert_direct_destination"].fillna(False).astype(bool)
 
