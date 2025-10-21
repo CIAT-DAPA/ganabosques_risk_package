@@ -11,8 +11,8 @@
 # Notes:
 #   - Uses pandas/numpy/tqdm and optional multiprocessing for assigning results back to the alert_direct table.
 #   - Progress is displayed with tqdm over chunked processing of plot IDs.
-import warnings
-warnings.filterwarnings("ignore")
+#import warnings
+#warnings.filterwarnings("ignore")
 
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import shared_memory
