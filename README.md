@@ -226,10 +226,10 @@ geopandas, rasterio, shapely, numpy, pandas, tqdm
 We recommend using conda for installing geospatial dependencies.
 
 # 📝 License and Citation
-Authors: CIAT-DAPA (Steven Sotelo and Team)
+Authors: Alliance Bioversity International & CIAT (Steven Sotelo and Team)
 Repository: https://github.com/CIAT-DAPA/ganabosques_risk_package
 License: MIT
 
 If you use this package, please cite:
 
-Sotelo, S. (2025). Ganabosques Risk Package: Multi-level Alert Computation for Deforestation and Land Use Monitoring. CIAT-DAPA.
+Sotelo, S. (2025). Ganabosques Risk Package: Alert Computation for Deforestation and Land Use Monitoring. Alliance Bioversity International & CIAT.

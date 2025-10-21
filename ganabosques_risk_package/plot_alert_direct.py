@@ -23,11 +23,13 @@ import geopandas as gpd
 import rasterio
 import rasterio.mask
 import rasterio.features
-from rasterio.windows import from_bounds
+from rasterio.windows import from_bounds, Window
 from rasterio.windows import transform as window_transform
+from rasterio.transform import rowcol
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import math
 
 
 # ----------------------------
@@ -84,9 +86,9 @@ def _get_raster_array_view() -> np.ndarray:
     shm = shared_memory.SharedMemory(name=_G_RASTER_SHM_NAME)
     return np.ndarray(_G_RASTER_SHAPE, dtype=_G_RASTER_DTYPE, buffer=shm.buf)
 
-
+"""
 def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
-    """Convert geometry bounds to a raster window clipped to raster limits."""
+    ""Convert geometry bounds to a raster window clipped to raster limits.""
     win = from_bounds(*bounds, transform=full_transform, width=raster_width, height=raster_height, boundless=True)
     row_off = max(0, int(np.floor(win.row_off)))
     col_off = max(0, int(np.floor(win.col_off)))
@@ -95,7 +97,55 @@ def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
     height = max(0, height)
     width = max(0, width)
     return (row_off, col_off, height, width)
+"""
+def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
+    """
+    Convert geometry bounds to a raster window, clamped to the raster extent.
 
+    Parameters
+    ----------
+    bounds : tuple
+        (minx, miny, maxx, maxy) of the geometry in raster CRS.
+    full_transform : Affine
+        Affine transform of the raster.
+    raster_width : int
+        Raster width (number of columns).
+    raster_height : int
+        Raster height (number of rows).
+
+    Returns
+    -------
+    row_off : int
+    col_off : int
+    h : int
+    w : int
+
+    Notes
+    -----
+    - Compatible with rasterio versions where from_bounds() does NOT accept 'boundless'.
+    - The returned window is guaranteed to be inside [0, width] x [0, height].
+      If the geometry lies completely outside, (h, w) will be (0, 0).
+    """
+    # 1) Compute tentative window from bounds (no 'boundless' keyword)
+    win = from_bounds(bounds[0], bounds[1], bounds[2], bounds[3], transform=full_transform)
+
+    # 2) Intersect with full image window to clamp to valid extent
+    full_win = Window(col_off=0, row_off=0, width=raster_width, height=raster_height)
+    win = win.intersection(full_win)
+
+    # 3) If completely outside, width/height may be 0 or negative (intersection ensures non-negative)
+    row_off = int(max(0, math.floor(win.row_off)))
+    col_off = int(max(0, math.floor(win.col_off)))
+    h = int(max(0, math.ceil(win.height)))
+    w = int(max(0, math.ceil(win.width)))
+
+    # Extra clamp just in case of edge rounding
+    if row_off >= raster_height or col_off >= raster_width:
+        return 0, 0, 0, 0
+    h = min(h, raster_height - row_off)
+    w = min(w, raster_width - col_off)
+
+    return row_off, col_off, h, w
 
 def _intersect_raster_deforestation(geom, raster_arr: np.ndarray) -> float:
     """Compute deforested area (ha) inside a polygon using the in-memory raster."""
