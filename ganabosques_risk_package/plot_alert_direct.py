@@ -1,117 +1,91 @@
 # Filename: plot_alert_direct.py
 # Description:
-#   Compute direct alerts and enviromentals indicators for plots
-#   based on deforestation, farming areas and protected areas
+#   Compute per-plot direct deforestation and land-use metrics by intersecting:
+#     - a deforestation raster (pixel-class based)
+#     - protected areas polygons
+#     - farming areas polygons
+#   The function parallelizes over plots and shares the raster efficiently across workers.
 #
 # Public API:
-#   - alert_direct(plots: gpd.GeoDataFrame,deforestation: str,protected_areas: str,farming_areas: str,deforestation_value: float = 2,
-#                   n_workers: int = 2, id_column: str = "id") -> pd.DataFrame
+#   - alert_direct(...)
 #
-# Author: Steven Sotelo
 # Notes:
-#   - Uses pandas/numpy/tqdm and optional multiprocessing for assigning results back to the alert_direct table.
-#   - Progress is displayed with tqdm over chunked processing of plot IDs.
-#import warnings
-#warnings.filterwarnings("ignore")
+#   - Robust to Windows limitations by falling back from SharedMemory to np.memmap.
+#   - Avoids rasterio 'boundless' kwarg (uses window intersection instead).
+#   - All areas reported in hectares; proportions in [0, 1].
+#   - CRS: everything is reprojected to the raster CRS; if a vector has no CRS, it is assumed
+#     to already be in the raster CRS.
+#
+# Author: CIAT-DAPA
 
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import shared_memory
-from typing import Tuple, Optional
-from shapely import wkb
+from __future__ import annotations
 
-import geopandas as gpd
-import rasterio
-import rasterio.mask
-import rasterio.features
-from rasterio.windows import from_bounds, Window
-from rasterio.windows import transform as window_transform
-from rasterio.transform import rowcol
+import os
+import math
+import tempfile
+from typing import Dict, Iterable, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
+import geopandas as gpd
+import rasterio
+from rasterio.windows import from_bounds, Window
+from rasterio.windows import transform as window_transform
+from rasterio.features import geometry_mask
+from shapely.geometry import mapping
+from shapely.ops import unary_union
+from shapely import wkb
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
-import math
 
 
-# ----------------------------
-# Global variables used by worker processes
-# ----------------------------
-_G_RASTER_SHM_NAME: Optional[str] = None
-_G_RASTER_SHAPE: Optional[Tuple[int, int]] = None
-_G_RASTER_DTYPE: Optional[str] = None
-_G_RASTER_NODATA: Optional[float] = None
-_G_RASTER_TRANSFORM_AFFINE_PARAMS: Optional[Tuple[float, float, float, float, float, float]] = None
-_G_PIXEL_AREA_HA: Optional[float] = None
-_G_DEFO_VALUE: Optional[float] = None
+# --------------------------------------------------------------------------------------
+# Globals used inside worker processes (set by _init_worker)
+# --------------------------------------------------------------------------------------
 
-_G_PROTECTED_GDF: Optional[gpd.GeoDataFrame] = None
-_G_FARMING_GDF: Optional[gpd.GeoDataFrame] = None
+_A_SHM = None               # SharedMemory handle (if used)
+_A_MEMMAP_PATH = None       # memmap path on disk (fallback if SHM fails)
+_A_ARRAY: Optional[np.ndarray] = None  # Read-only view of raster (SHM or memmap)
+_A_SHAPE: Optional[Tuple[int, int]] = None
+_A_DTYPE: Optional[np.dtype] = None
 
+_A_TRANSFORM = None         # Affine transform of the raster
+_A_WIDTH: Optional[int] = None
+_A_HEIGHT: Optional[int] = None
 
-def _init_worker(
-    shm_name: str,
-    raster_shape: Tuple[int, int],
-    raster_dtype: str,
-    raster_nodata: Optional[float],
-    affine_params: Tuple[float, float, float, float, float, float],
-    pixel_area_ha: float,
-    defo_value: float,
-    protected_gdf: gpd.GeoDataFrame,
-    farming_gdf: gpd.GeoDataFrame,
-):
-    """Initialize worker process with shared raster and vector layer references."""
-    global _G_RASTER_SHM_NAME, _G_RASTER_SHAPE, _G_RASTER_DTYPE, _G_RASTER_NODATA
-    global _G_RASTER_TRANSFORM_AFFINE_PARAMS, _G_PIXEL_AREA_HA, _G_DEFO_VALUE
-    global _G_PROTECTED_GDF, _G_FARMING_GDF
+_A_PIXEL_AREA_HA: Optional[float] = None  # area of a pixel in hectares
+_A_DEFO_VALUE: Optional[int] = None       # deforestation class value to count
 
-    _G_RASTER_SHM_NAME = shm_name
-    _G_RASTER_SHAPE = raster_shape
-    _G_RASTER_DTYPE = raster_dtype
-    _G_RASTER_NODATA = raster_nodata
-    _G_RASTER_TRANSFORM_AFFINE_PARAMS = affine_params
-    _G_PIXEL_AREA_HA = pixel_area_ha
-    _G_DEFO_VALUE = defo_value
-
-    _G_PROTECTED_GDF = protected_gdf
-    if _G_PROTECTED_GDF is not None and len(_G_PROTECTED_GDF) > 0:
-        _G_PROTECTED_GDF.sindex
-
-    _G_FARMING_GDF = farming_gdf
-    if _G_FARMING_GDF is not None and len(_G_FARMING_GDF) > 0:
-        _G_FARMING_GDF.sindex
+# Protected/Farming unions (single multipolygon per layer for fast area intersections)
+_G_PROTECTED_UNION = None
+_G_FARMING_UNION = None
 
 
-def _get_raster_array_view() -> np.ndarray:
-    """Return a shared-memory view of the raster array."""
-    assert _G_RASTER_SHM_NAME and _G_RASTER_SHAPE and _G_RASTER_DTYPE
-    shm = shared_memory.SharedMemory(name=_G_RASTER_SHM_NAME)
-    return np.ndarray(_G_RASTER_SHAPE, dtype=_G_RASTER_DTYPE, buffer=shm.buf)
+# --------------------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------------------
 
-"""
-def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
-    ""Convert geometry bounds to a raster window clipped to raster limits.""
-    win = from_bounds(*bounds, transform=full_transform, width=raster_width, height=raster_height, boundless=True)
-    row_off = max(0, int(np.floor(win.row_off)))
-    col_off = max(0, int(np.floor(win.col_off)))
-    height = min(raster_height - row_off, int(np.ceil(win.height)))
-    width = min(raster_width - col_off, int(np.ceil(win.width)))
-    height = max(0, height)
-    width = max(0, width)
-    return (row_off, col_off, height, width)
-"""
-def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
-    """
-    Convert geometry bounds to a raster window, clamped to the raster extent.
+def _safe_div(num: float, den: float) -> float:
+    """Return num/den with protection for zero/NaN denominators."""
+    # If denominator is <= 0 (or very close) return 0 safely
+    if den is None or den <= 0:
+        return 0.0
+    return float(num) / float(den)
+
+
+def _bounds_to_window(bounds, full_transform, raster_width: int, raster_height: int) -> Tuple[int, int, int, int]:
+    """Convert geometry bounds to a clamped raster window (no 'boundless' kwarg).
 
     Parameters
     ----------
     bounds : tuple
         (minx, miny, maxx, maxy) of the geometry in raster CRS.
     full_transform : Affine
-        Affine transform of the raster.
+        Raster affine transform.
     raster_width : int
-        Raster width (number of columns).
+        Number of columns in the raster.
     raster_height : int
-        Raster height (number of rows).
+        Number of rows in the raster.
 
     Returns
     -------
@@ -122,212 +96,443 @@ def _bounds_to_window(bounds, full_transform, raster_width, raster_height):
 
     Notes
     -----
-    - Compatible with rasterio versions where from_bounds() does NOT accept 'boundless'.
-    - The returned window is guaranteed to be inside [0, width] x [0, height].
-      If the geometry lies completely outside, (h, w) will be (0, 0).
+    - Uses 'from_bounds' to compute a tentative window and then intersects it with
+      the full image window to clamp to the raster extent.
+    - If geometry lies completely outside, (h, w) will be (0, 0).
     """
-    # 1) Compute tentative window from bounds (no 'boundless' keyword)
+    # 1) tentative window from bounds
     win = from_bounds(bounds[0], bounds[1], bounds[2], bounds[3], transform=full_transform)
 
-    # 2) Intersect with full image window to clamp to valid extent
+    # 2) intersect with full image
     full_win = Window(col_off=0, row_off=0, width=raster_width, height=raster_height)
     win = win.intersection(full_win)
 
-    # 3) If completely outside, width/height may be 0 or negative (intersection ensures non-negative)
+    # 3) clamp and cast
     row_off = int(max(0, math.floor(win.row_off)))
     col_off = int(max(0, math.floor(win.col_off)))
     h = int(max(0, math.ceil(win.height)))
     w = int(max(0, math.ceil(win.width)))
 
-    # Extra clamp just in case of edge rounding
+    # edge clamp
     if row_off >= raster_height or col_off >= raster_width:
         return 0, 0, 0, 0
     h = min(h, raster_height - row_off)
     w = min(w, raster_width - col_off)
-
     return row_off, col_off, h, w
 
-def _intersect_raster_deforestation(geom, raster_arr: np.ndarray) -> float:
-    """Compute deforested area (ha) inside a polygon using the in-memory raster."""
-    from affine import Affine
-    transform = Affine(*_G_RASTER_TRANSFORM_AFFINE_PARAMS)
-    height, width = raster_arr.shape
 
-    # Determine raster window around the polygon
-    row_off, col_off, h, w = _bounds_to_window(geom.bounds, transform, width, height)
-    if h == 0 or w == 0:
+# --------------------------------------------------------------------------------------
+# Worker-side initialization and per-plot processing
+# --------------------------------------------------------------------------------------
+
+def _init_worker(
+    shape: Tuple[int, int],
+    dtype: str,
+    transform,
+    width: int,
+    height: int,
+    pixel_area_ha: float,
+    defo_value: int,
+    shm_name: Optional[str] = None,
+    memmap_path: Optional[str] = None,
+    protected_union_wkb: Optional[bytes] = None,
+    farming_union_wkb: Optional[bytes] = None,
+):
+    """Initializer executed once in each worker process.
+
+    Sets global pointers to:
+      - Raster array view (via SharedMemory or np.memmap).
+      - Raster metadata (transform, size, pixel area, class value).
+      - Protected/Farming unions (as shapely geometries from WKB).
+    """
+    global _A_SHM, _A_MEMMAP_PATH, _A_ARRAY, _A_SHAPE, _A_DTYPE
+    global _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_PIXEL_AREA_HA, _A_DEFO_VALUE
+    global _G_PROTECTED_UNION, _G_FARMING_UNION
+
+    _A_SHAPE = tuple(shape)
+    _A_DTYPE = np.dtype(dtype)
+    _A_TRANSFORM = transform
+    _A_WIDTH = int(width)
+    _A_HEIGHT = int(height)
+    _A_PIXEL_AREA_HA = float(pixel_area_ha)
+    _A_DEFO_VALUE = int(defo_value)
+
+    # Attach raster backing
+    if shm_name is not None:
+        # Use shared memory (fast, in-RAM)
+        from multiprocessing import shared_memory
+        _A_SHM = shared_memory.SharedMemory(name=shm_name)
+        _A_ARRAY = np.ndarray(_A_SHAPE, dtype=_A_DTYPE, buffer=_A_SHM.buf)
+    elif memmap_path is not None:
+        # Fallback: use on-disk memmap (robust on Windows and low-RAM)
+        _A_MEMMAP_PATH = memmap_path
+        _A_ARRAY = np.memmap(_A_MEMMAP_PATH, dtype=_A_DTYPE, mode="r", shape=_A_SHAPE)
+    else:
+        raise RuntimeError("Worker received neither shared memory name nor memmap path.")
+
+    # Unions as shapely geometries (if provided)
+    _G_PROTECTED_UNION = wkb.loads(protected_union_wkb) if protected_union_wkb else None
+    _G_FARMING_UNION = wkb.loads(farming_union_wkb) if farming_union_wkb else None
+
+
+def _intersect_raster_deforestation(geom) -> float:
+    """Compute deforested area (ha) within geometry using the global raster view.
+
+    Steps:
+      1) Convert geometry bounds to a clamped window in the raster.
+      2) Early return 0.0 if window is empty (outside the raster).
+      3) Slice the raster view and build a geometry mask (True=inside polygon).
+      4) Count pixels equal to the deforestation class AND inside polygon.
+      5) Multiply by pixel area (ha).
+
+    Returns:
+        Deforested area in hectares (float).
+    """
+    global _A_ARRAY, _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_DEFO_VALUE, _A_PIXEL_AREA_HA
+    if _A_ARRAY is None:
         return 0.0
 
-    r_slice = raster_arr[row_off:row_off + h, col_off:col_off + w]
-    win = rasterio.windows.Window(col_off, row_off, w, h)
-    win_transform = window_transform(win, transform)
+    # Compute window for the geometry envelope
+    row_off, col_off, h, w = _bounds_to_window(geom.bounds, _A_TRANSFORM, _A_WIDTH, _A_HEIGHT)
+    if h == 0 or w == 0:
+        # Fully outside the raster extent
+        return 0.0
 
-    mask = rasterio.features.geometry_mask(
-        [geom.__geo_interface__],
+    # Slice raster
+    view = _A_ARRAY[row_off: row_off + h, col_off: col_off + w]
+
+    # Window-specific transform (for correct mask rasterization)
+    win_tf = window_transform(Window(col_off, row_off, w, h), _A_TRANSFORM)
+
+    # Build mask True INSIDE geometry
+    mask_inside = geometry_mask(
+        [mapping(geom)],
         out_shape=(h, w),
-        transform=win_transform,
-        invert=True
+        transform=win_tf,
+        invert=True,   # invert=True -> True for pixels inside shapes
+        all_touched=False,
     )
 
-    # Handle NoData pixels
-    if _G_RASTER_NODATA is not None:
-        valid = r_slice != _G_RASTER_NODATA
-    else:
-        valid = np.ones_like(r_slice, dtype=bool)
+    # Pixels that match deforestation class AND are inside the geometry
+    hits = (view == _A_DEFO_VALUE) & mask_inside
+    pixels = int(np.count_nonzero(hits))
 
-    cond = (r_slice == _G_DEFO_VALUE) & valid & mask
-    count = int(np.count_nonzero(cond))
-    return count * _G_PIXEL_AREA_HA
+    return float(pixels) * float(_A_PIXEL_AREA_HA)
 
 
-def _intersect_area_layer(geom, layer_gdf: Optional[gpd.GeoDataFrame]) -> float:
-    """Compute intersection area (ha) between polygon and vector layer."""
-    if layer_gdf is None or len(layer_gdf) == 0:
+def _intersect_area_ha(geom, union_geom) -> float:
+    """Return intersection area in hectares between 'geom' and a union geometry.
+
+    If 'union_geom' is None or empty, returns 0.0.
+    """
+    if (union_geom is None) or union_geom.is_empty or geom.is_empty:
         return 0.0
-
-    idx = list(layer_gdf.sindex.intersection(geom.bounds))
-    if not idx:
-        return 0.0
-
-    candidates = layer_gdf.iloc[idx]
-    inters = candidates.intersection(geom)
-    area = float(np.sum([g.area for g in inters if g is not None and not g.is_empty]))
-    return area / 10000.0  # convert m² → ha
+    return float(geom.intersection(union_geom).area) / 10000.0
 
 
-def _process_one(record: Tuple):
-    """Process one plot polygon and compute all metrics."""
-    plot_id, geom_wkb = record
-    geom = wkb.loads(geom_wkb)
+def _process_one(plot_id: str, geom) -> Dict[str, float]:
+    """Compute all metrics for a single plot geometry.
 
-    raster_arr = _get_raster_array_view()
-    plot_area_ha = geom.area / 10000.0
+    Returns
+    -------
+    dict with:
+      - id
+      - plot_area
+      - deforested_area
+      - deforested_proportion
+      - protected_areas_area
+      - protected_areas_proportion
+      - farming_in_area
+      - farming_in_proportion
+      - farming_out_area
+      - farming_out_proportion
+      - alert_direct (bool as Python bool)
+    """
+    # Area of the plot in hectares (assuming CRS in meters)
+    plot_area_ha = float(geom.area) / 10000.0
 
-    # --- Deforestation area ---
-    defo_area_ha = _intersect_raster_deforestation(geom, raster_arr)
-    defo_prop = (defo_area_ha / plot_area_ha) if plot_area_ha > 0 else 0.0
+    # Deforestation (ha) by intersecting raster class
+    defo_ha = _intersect_raster_deforestation(geom)
 
-    # New field: alert_direct is True if deforested_area > 0
-    alert_direct = defo_area_ha > 0
+    # Protected areas (ha) via geometry intersection
+    prot_ha = _intersect_area_ha(geom, _G_PROTECTED_UNION)
 
-    # --- Protected areas intersection ---
-    protected_area_ha = _intersect_area_layer(geom, _G_PROTECTED_GDF)
-    protected_prop = (protected_area_ha / plot_area_ha) if plot_area_ha > 0 else 0.0
+    # Farming in (ha) and out (ha) via geometry intersection
+    farm_in_ha = _intersect_area_ha(geom, _G_FARMING_UNION)
+    farm_out_ha = max(plot_area_ha - farm_in_ha, 0.0)
 
-    # --- Farming areas intersection ---
-    farming_in_ha = _intersect_area_layer(geom, _G_FARMING_GDF)
-    farming_in_ha = max(0.0, min(farming_in_ha, plot_area_ha))
-    farming_out_ha = max(0.0, plot_area_ha - farming_in_ha)
-    farming_in_prop = (farming_in_ha / plot_area_ha) if plot_area_ha > 0 else 0.0
-    farming_out_prop = (farming_out_ha / plot_area_ha) if plot_area_ha > 0 else 0.0
+    # Proportions
+    defo_prop = _safe_div(defo_ha, plot_area_ha)
+    prot_prop = _safe_div(prot_ha, plot_area_ha)
+    farm_in_prop = _safe_div(farm_in_ha, plot_area_ha)
+    farm_out_prop = _safe_div(farm_out_ha, plot_area_ha)
 
-    # Return all computed values as a dictionary
+    # Alert flag if any deforestation detected
+    alert = bool(defo_ha > 0.0)
+
     return {
         "id": plot_id,
         "plot_area": plot_area_ha,
-        "deforested_area": defo_area_ha,
+        "deforested_area": defo_ha,
         "deforested_proportion": defo_prop,
-        "protected_areas_area": protected_area_ha,
-        "protected_areas_proportion": protected_prop,
-        "farming_in_area": farming_in_ha,
-        "farming_in_proportion": farming_in_prop,
-        "farming_out_area": farming_out_ha,
-        "farming_out_proportion": farming_out_prop,
-        "alert_direct": alert_direct,
+        "protected_areas_area": prot_ha,
+        "protected_areas_proportion": prot_prop,
+        "farming_in_area": farm_in_ha,
+        "farming_in_proportion": farm_in_prop,
+        "farming_out_area": farm_out_ha,
+        "farming_out_proportion": farm_out_prop,
+        "alert_direct": alert,
     }
 
+
+# --------------------------------------------------------------------------------------
+# Public API
+# --------------------------------------------------------------------------------------
 
 def alert_direct(
     plots: gpd.GeoDataFrame,
     deforestation: str,
     protected_areas: str,
     farming_areas: str,
-    deforestation_value: float = 2,
+    deforestation_value: int = 2,
     n_workers: int = 2,
     id_column: str = "id",
 ) -> pd.DataFrame:
-    """Compute overlay metrics for each plot including deforestation alerts."""
+    """Compute per-plot direct deforestation and land-use metrics.
+
+    Parameters
+    ----------
+    plots : gpd.GeoDataFrame
+        Plot polygons. Must contain an ID column (default 'id').
+    deforestation : str
+        Path to a raster file (e.g., GeoTIFF) containing a deforestation class code.
+    protected_areas : str
+        Path to a polygon vector dataset (shp/geojson) for protected areas.
+    farming_areas : str
+        Path to a polygon vector dataset (shp/geojson) for farming areas.
+    deforestation_value : int, default 2
+        Pixel value that encodes "deforestation" in the raster.
+    n_workers : int, default 2
+        Number of worker processes (>=1). If 1, computation is serial.
+    id_column : str, default "id"
+        Name of the plot ID column in `plots`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns:
+          - id
+          - plot_area
+          - deforested_area
+          - deforested_proportion
+          - protected_areas_area
+          - protected_areas_proportion
+          - farming_in_area
+          - farming_in_proportion
+          - farming_out_area
+          - farming_out_proportion
+          - alert_direct (bool)
+    """
     if id_column not in plots.columns:
-        raise ValueError(f"The 'plots' GeoDataFrame must contain column '{id_column}'.")
+        raise ValueError(f"plots is missing the ID column '{id_column}'")
 
-    # --- Load raster once ---
+    # ------------------------
+    # Load raster (once)
+    # ------------------------
     with rasterio.open(deforestation) as src:
-        raster_crs = src.crs
+        raster_arr = src.read(1)  # (H, W)
         transform = src.transform
-        nodata = src.nodata
-        raster_arr = src.read(1)
-        pixel_area_ha = abs(transform.a * transform.e) / 10000.0
+        width, height = src.width, src.height
+        raster_crs = src.crs
 
-    # --- Load vector layers and align CRS ---
-    protected_gdf = gpd.read_file(protected_areas) if protected_areas else gpd.GeoDataFrame(geometry=[])
-    farming_gdf = gpd.read_file(farming_areas) if farming_areas else gpd.GeoDataFrame(geometry=[])
+        # Pixel area in m^2 -> to hectares
+        # |det(Affine)| = pixel size area in projected units (assume meters)
+        pixel_area_m2 = abs(transform.a * transform.e - transform.b * transform.d)
+        pixel_area_ha = float(pixel_area_m2) / 10000.0
 
-    plots_crs = plots.to_crs(raster_crs)
-    protected_crs = protected_gdf.to_crs(raster_crs) if len(protected_gdf) else protected_gdf
-    farming_crs = farming_gdf.to_crs(raster_crs) if len(farming_gdf) else farming_gdf
+    # ------------------------
+    # Load vectors (once)
+    # ------------------------
+    # Read protected and farming layers
+    prot = gpd.read_file(protected_areas)
+    farm = gpd.read_file(farming_areas)
 
-    # --- Shared memory for raster ---
-    shm = shared_memory.SharedMemory(create=True, size=raster_arr.nbytes)
-    shm_arr = np.ndarray(raster_arr.shape, dtype=raster_arr.dtype, buffer=shm.buf)
-    shm_arr[:] = raster_arr
+    # If a vector has no CRS, assume it is already in raster CRS
+    if raster_crs is not None:
+        if prot.crs is None:
+            prot = prot.set_crs(raster_crs, inplace=False)
+        if farm.crs is None:
+            farm = farm.set_crs(raster_crs, inplace=False)
+    # Reproject to raster CRS if available
+    if raster_crs is not None:
+        if prot.crs != raster_crs:
+            prot = prot.to_crs(raster_crs)
+        if farm.crs != raster_crs:
+            farm = farm.to_crs(raster_crs)
 
-    records = list(zip(plots_crs[id_column].tolist(), plots_crs.geometry.apply(lambda g: g.wkb).tolist()))
-    affine_params = (transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+    # Prepare unions for fast intersection (can be None if empty)
+    prot_union = unary_union(prot.geometry) if (len(prot) > 0 and prot.geometry.notnull().any()) else None
+    farm_union = unary_union(farm.geometry) if (len(farm) > 0 and farm.geometry.notnull().any()) else None
 
-    try:
-        with ProcessPoolExecutor(max_workers=int(max(1, n_workers))) as ex:
-            ex._initializer = _init_worker
-            ex._initargs = (
-                shm.name,
-                raster_arr.shape,
-                str(raster_arr.dtype),
-                nodata,
-                affine_params,
-                pixel_area_ha,
-                float(deforestation_value),
-                protected_crs,
-                farming_crs,
-            )
+    # Encode unions as WKB for safe pickling to workers
+    prot_union_wkb = wkb.dumps(prot_union) if prot_union else None
+    farm_union_wkb = wkb.dumps(farm_union) if farm_union else None
 
-            results = []
-            for out in tqdm(ex.map(_process_one, records), total=len(records), desc="Processing plots"):
-                results.append(out)
+    # ------------------------
+    # Prepare plots (reproject & clean)
+    # ------------------------
+    plots = plots[[id_column, "geometry"]].copy()
 
-    finally:
-        shm.close()
-        shm.unlink()
+    # If plots has no CRS and raster has CRS, we assume they are in the raster CRS
+    if raster_crs is not None and plots.crs is None:
+        plots = plots.set_crs(raster_crs, inplace=False)
 
-    # --- Final DataFrame ---
-    df = pd.DataFrame(results)
-    df = df[
-        [
-            "id",
-            "plot_area",
-            "deforested_area",
-            "deforested_proportion",
-            "protected_areas_area",
-            "protected_areas_proportion",
-            "farming_in_area",
-            "farming_in_proportion",
-            "farming_out_area",
-            "farming_out_proportion",
-            "alert_direct",
-        ]
-    ].sort_values(by="id")
+    # Reproject plots to raster CRS (if available)
+    if raster_crs is not None and plots.crs != raster_crs:
+        plots = plots.to_crs(raster_crs)
 
-    return df
+    # Drop null geometries
+    plots = plots[plots.geometry.notnull()].reset_index(drop=True)
+
+    # ------------------------
+    # Parallel or serial path
+    # ------------------------
+    results: List[Dict] = []
+
+    if n_workers <= 1 or len(plots) == 0:
+        # --- Serial path: set globals directly (no SHM/memmap needed) ---
+        global _A_ARRAY, _A_SHAPE, _A_DTYPE
+        global _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_PIXEL_AREA_HA, _A_DEFO_VALUE
+        global _G_PROTECTED_UNION, _G_FARMING_UNION
+
+        _A_ARRAY = raster_arr                      # usamos el array en memoria del proceso actual
+        _A_SHAPE = raster_arr.shape
+        _A_DTYPE = raster_arr.dtype
+        _A_TRANSFORM = transform
+        _A_WIDTH = width
+        _A_HEIGHT = height
+        _A_PIXEL_AREA_HA = float(pixel_area_ha)
+        _A_DEFO_VALUE = int(deforestation_value)
+
+        # Asignar las uniones directamente (no WKB en el proceso principal)
+        _G_PROTECTED_UNION = prot_union
+        _G_FARMING_UNION = farm_union
+
+        # Iterate plots one by one (serial)
+        for _, row in tqdm(plots.iterrows(), total=len(plots), desc="Computing direct alerts (serial)"):
+            metrics = _process_one(plot_id=str(row[id_column]), geom=row.geometry)
+            results.append(metrics)
+
+    else:
+        # Parallel path: try SharedMemory first; if it fails, fallback to memmap
+        use_shm = False
+        shm = None
+        memmap_path = None
+
+        try:
+            # Try to allocate shared memory for the raster
+            from multiprocessing import shared_memory
+            shm = shared_memory.SharedMemory(create=True, size=raster_arr.nbytes)
+            shm_view = np.ndarray(raster_arr.shape, dtype=raster_arr.dtype, buffer=shm.buf)
+            shm_view[:] = raster_arr
+            use_shm = True
+        except Exception:
+            # Fallback: np.memmap on disk
+            fd, memmap_path = tempfile.mkstemp(suffix=".dat", prefix="ganabosques_risk_")
+            os.close(fd)
+            mm = np.memmap(memmap_path, dtype=raster_arr.dtype, mode="w+", shape=raster_arr.shape)
+            mm[:] = raster_arr[:]
+            mm.flush()
+
+        # Build initializer args dict (shared to all workers)
+        init_kwargs = dict(
+            shape=raster_arr.shape,
+            dtype=str(raster_arr.dtype),
+            transform=transform,
+            width=width,
+            height=height,
+            pixel_area_ha=pixel_area_ha,
+            defo_value=int(deforestation_value),
+            shm_name=(shm.name if use_shm else None),
+            memmap_path=(None if use_shm else memmap_path),
+            protected_union_wkb=prot_union_wkb,
+            farming_union_wkb=farm_union_wkb,
+        )
+
+        # Submit jobs
+        try:
+            with ProcessPoolExecutor(
+                max_workers=int(n_workers),
+                initializer=_init_worker,
+                initargs=tuple(init_kwargs.values()),
+            ) as ex:
+                # Map over plots with progress bar
+                futures = []
+                for _, row in plots.iterrows():
+                    futures.append(ex.submit(_process_one, str(row[id_column]), row.geometry))
+                for f in tqdm(futures, total=len(futures), desc="Computing direct alerts (parallel)"):
+                    results.append(f.result())
+        finally:
+            # Clean up backing stores
+            if use_shm and shm is not None:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+            if (not use_shm) and memmap_path is not None:
+                try:
+                    os.remove(memmap_path)
+                except Exception:
+                    pass
+
+    # ------------------------
+    # Build final DataFrame (stable schema/order)
+    # ------------------------
+    out = pd.DataFrame(results)
+    # Ensure column order
+    cols = [
+        "id",
+        "plot_area",
+        "deforested_area",
+        "deforested_proportion",
+        "protected_areas_area",
+        "protected_areas_proportion",
+        "farming_in_area",
+        "farming_in_proportion",
+        "farming_out_area",
+        "farming_out_proportion",
+        "alert_direct",
+    ]
+    # Add any missing columns (if some plot had no geometry, etc.)
+    for c in cols:
+        if c not in out.columns:
+            out[c] = 0 if c != "alert_direct" else False
+
+    out = out[cols].reset_index(drop=True)
+    # Cast types explicitly
+    out["alert_direct"] = out["alert_direct"].astype(bool)
+    for c in cols:
+        if c.endswith("_proportion"):
+            out[c] = out[c].clip(lower=0.0, upper=1.0)
+
+    return out
 
 
-# ----------------------------
-# Example usage (commented out)
-# ----------------------------
-# plots_gdf = gpd.read_file("plots.shp")
-# df_out = compute_plot_overlays(
-#     plots=plots_gdf,
-#     deforestation="deforestation.tif",
-#     protected_areas="protected.shp",
-#     farming_areas="farming.shp",
-#     deforestation_value=2,
-#     n_workers=4,
-# )
-# print(df_out.head())
+# --------------------------------------------------------------------------------------
+# Example usage (commented)
+# --------------------------------------------------------------------------------------
+# if __name__ == "__main__":
+#     import geopandas as gpd
+#     plots = gpd.read_file("tests/data_test/plot_intersect.shp")
+#     if "id" not in plots.columns:
+#         plots["id"] = [f"p{i}" for i in range(len(plots))]
+#     out = alert_direct(
+#         plots=plots,
+#         deforestation="tests/data_test/deforestation.tif",
+#         protected_areas="tests/data_test/areas.shp",
+#         farming_areas="tests/data_test/areas.shp",
+#         deforestation_value=2,
+#         n_workers=2,
+#     )
+#     print(out.head())
