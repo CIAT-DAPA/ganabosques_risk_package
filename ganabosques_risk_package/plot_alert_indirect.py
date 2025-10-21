@@ -57,39 +57,38 @@ def _build_new_dataframe(
 ) -> pd.DataFrame:
     """Construct the consolidated DataFrame with both origin and destination annotations.
 
-    Steps:
-      1) Create origin-prefixed `alert_direct` table and merge with movement on (origen_id).
-      2) Create destination-prefixed `alert_direct` table and merge with movement on (destination_id).
-      3) Combine both into a single DataFrame `new_df` aligned to movement rows
-         (each row contains origin-side and destination-side annotations).
-
-    Note:
-      - Doing two separate merges and then joining them back on movement index
-        is equivalent to starting from movement and merging both sides one after another.
-        We follow the latter for clarity and performance.
-
-    Args:
-        alert_direct_df: The direct alerts table.
-        movement_df: Movement edges table.
-
-    Returns:
-        new_df: movement_df enriched with both origin and destination alert annotations.
-                Contains at least columns:
-                  - origen_id, destination_id
-                  - origen_alert_direct, destination_alert_direct  (booleans; may be NaN -> fill later)
+    Produces boolean columns:
+      - alert_direct_origen
+      - alert_direct_destination
     """
-    # Keep a stable index for movement rows to align merges.
+    # Work on a copy with a clean incremental index
     mv = movement_df.reset_index(drop=True).copy()
 
-    # Origin side merge
-    #mv = mv.merge(alert_direct_df, how="left", left_on="origen_id", right_on="id", suffixes="_origin")
-    mv = mv.merge(alert_direct_df, how="left", left_on="origen_id", right_on="id", suffixes=("_origin", "_x"))
+    # Keep only the minimal columns we need from alert_direct_df to avoid name clutter
+    ad_min = alert_direct_df[["id", "alert_direct"]].copy()
 
-    # Destination side merge
-    #mv = mv.merge(alert_direct_df, how="left", left_on="destination_id", right_on="id", suffixes="_destination")
-    mv = mv.merge(alert_direct_df, how="left", left_on="destination_id", right_on="id", suffixes=("_destination", "_y"))
+    # ---- ORIGIN side: merge on (origen_id == id) and rename alert flag
+    mv = mv.merge(
+        ad_min,
+        how="left",
+        left_on="origen_id",
+        right_on="id",
+    )
+    # Rename and drop the join helper column 'id' that came from the right
+    mv = mv.rename(columns={"alert_direct": "alert_direct_origen"})
+    mv = mv.drop(columns=["id"])
 
-    print(mv.columns)
+    # ---- DESTINATION side: merge on (destination_id == id) and rename alert flag
+    mv = mv.merge(
+        ad_min,
+        how="left",
+        left_on="destination_id",
+        right_on="id",
+    )
+    mv = mv.rename(columns={"alert_direct": "alert_direct_destination"})
+    mv = mv.drop(columns=["id"])
+
+    # Ensure pure booleans with safe defaults (NaN -> False)
     mv["alert_direct_origen"] = mv["alert_direct_origen"].fillna(False).astype(bool)
     mv["alert_direct_destination"] = mv["alert_direct_destination"].fillna(False).astype(bool)
 
