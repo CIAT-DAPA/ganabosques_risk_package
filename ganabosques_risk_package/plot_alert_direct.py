@@ -17,7 +17,7 @@
 #   - All areas reported in hectares; proportions in [0, 1].
 #   - CRS: everything is reprojected to the raster CRS; if a vector has no CRS, it is assumed
 #     to already be in the raster CRS.
-#from __future__ import annotations
+from __future__ import annotations
 
 import warnings
 warnings.filterwarnings("ignore")

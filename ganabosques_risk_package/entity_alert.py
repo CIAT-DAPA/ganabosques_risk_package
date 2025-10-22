@@ -10,7 +10,7 @@
 # Notes:
 #   - Uses pandas/numpy/tqdm and optional multiprocessing for assigning results back to the alert_direct table.
 #   - Progress is displayed with tqdm over chunked processing of plot IDs.
-#from __future__ import annotations
+from __future__ import annotations
 
 import warnings
 warnings.filterwarnings("ignore")
