@@ -28,7 +28,7 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          python -m unittest discover -s tests -p 'test_*.py'
+          python -m unittest discover -s tests -v
 
   MergeToMain:
     needs: [TestGanabosquesRisk]
