@@ -7,10 +7,14 @@
 #   - alert_indirect(alert_direct_df: pd.DataFrame, movement_df: pd.DataFrame, n_workers: int = 2) -> pd.DataFrame
 #
 # Author: Steven Sotelo
+#
 # Notes:
 #   - Uses pandas/numpy/tqdm and optional multiprocessing for assigning results back to the alert_direct table.
 #   - Progress is displayed with tqdm over chunked processing of plot IDs.
-from __future__ import annotations
+#from __future__ import annotations
+
+import warnings
+warnings.filterwarnings("ignore")
 
 from typing import Dict, Tuple, List
 from concurrent.futures import ProcessPoolExecutor

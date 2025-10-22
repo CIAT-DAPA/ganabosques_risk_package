@@ -9,16 +9,18 @@
 # Public API:
 #   - alert_direct(...)
 #
+# Author: Steven Sotelo
+#
 # Notes:
 #   - Robust to Windows limitations by falling back from SharedMemory to np.memmap.
 #   - Avoids rasterio 'boundless' kwarg (uses window intersection instead).
 #   - All areas reported in hectares; proportions in [0, 1].
 #   - CRS: everything is reprojected to the raster CRS; if a vector has no CRS, it is assumed
 #     to already be in the raster CRS.
-#
-# Author: CIAT-DAPA
+#from __future__ import annotations
 
-from __future__ import annotations
+import warnings
+warnings.filterwarnings("ignore")
 
 import os
 import math
