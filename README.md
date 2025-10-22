@@ -217,13 +217,15 @@ python -m unittest discover -s tests -v
 Run a specific test file:
 
 ```bash
-python -m unittest tests.test_plot_alert_indirect_unittest -v
+python -m unittest tests.test_plot_alert_direct -v
+python -m unittest tests.test_plot_alert_indirect -v
+python -m unittest tests.test_entity_alert -v
 ```
 
 # Environment requirements:
 
 geopandas, rasterio, shapely, numpy, pandas, tqdm
-We recommend using conda for installing geospatial dependencies.
+We recommend using pip for installing geospatial dependencies.
 
 # 📝 License and Citation
 Authors: Alliance Bioversity International & CIAT (Steven Sotelo and Team)
@@ -232,4 +234,5 @@ License: MIT
 
 If you use this package, please cite:
 
-Sotelo, S. (2025). Ganabosques Risk Package: Alert Computation for Deforestation and Land Use Monitoring. Alliance Bioversity International & CIAT.
+Sotelo, S. (2025). Ganabosques Risk Package: Alert computation for monitoring deforestation and enviromental indicators.
+Alliance Bioversity International & CIAT.
