@@ -48,6 +48,7 @@ _A_MEMMAP_PATH = None       # memmap path on disk (fallback if SHM fails)
 _A_ARRAY: Optional[np.ndarray] = None  # Read-only view of raster (SHM or memmap)
 _A_SHAPE: Optional[Tuple[int, int]] = None
 _A_DTYPE: Optional[np.dtype] = None
+_A_RASTER_PATH = None   # streaming mode: path to the raster on disk
 
 _A_TRANSFORM = None         # Affine transform of the raster
 _A_WIDTH: Optional[int] = None
@@ -137,17 +138,12 @@ def _init_worker(
     memmap_path: Optional[str] = None,
     protected_union_wkb: Optional[bytes] = None,
     farming_union_wkb: Optional[bytes] = None,
+    raster_path: Optional[str] = None,   # <-- nuevo
 ):
-    """Initializer executed once in each worker process.
-
-    Sets global pointers to:
-      - Raster array view (via SharedMemory or np.memmap).
-      - Raster metadata (transform, size, pixel area, class value).
-      - Protected/Farming unions (as shapely geometries from WKB).
-    """
+    """Initializer executed once in each worker process."""
     global _A_SHM, _A_MEMMAP_PATH, _A_ARRAY, _A_SHAPE, _A_DTYPE
     global _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_PIXEL_AREA_HA, _A_DEFO_VALUE
-    global _G_PROTECTED_UNION, _G_FARMING_UNION
+    global _G_PROTECTED_UNION, _G_FARMING_UNION, _A_RASTER_PATH
 
     _A_SHAPE = tuple(shape)
     _A_DTYPE = np.dtype(dtype)
@@ -159,64 +155,57 @@ def _init_worker(
 
     # Attach raster backing
     if shm_name is not None:
-        # Use shared memory (fast, in-RAM)
         from multiprocessing import shared_memory
         _A_SHM = shared_memory.SharedMemory(name=shm_name)
         _A_ARRAY = np.ndarray(_A_SHAPE, dtype=_A_DTYPE, buffer=_A_SHM.buf)
+        _A_RASTER_PATH = None
     elif memmap_path is not None:
-        # Fallback: use on-disk memmap (robust on Windows and low-RAM)
         _A_MEMMAP_PATH = memmap_path
         _A_ARRAY = np.memmap(_A_MEMMAP_PATH, dtype=_A_DTYPE, mode="r", shape=_A_SHAPE)
+        _A_RASTER_PATH = None
+    elif raster_path is not None:
+        # Streaming mode: no array in memory; read windows from file per call
+        _A_ARRAY = None
+        _A_RASTER_PATH = raster_path
     else:
-        raise RuntimeError("Worker received neither shared memory name nor memmap path.")
+        raise RuntimeError("Worker received neither SHM nor memmap nor raster_path (streaming).")
 
-    # Unions as shapely geometries (if provided)
+    # Unions
     _G_PROTECTED_UNION = wkb.loads(protected_union_wkb) if protected_union_wkb else None
     _G_FARMING_UNION = wkb.loads(farming_union_wkb) if farming_union_wkb else None
 
 
 def _intersect_raster_deforestation(geom) -> float:
-    """Compute deforested area (ha) within geometry using the global raster view.
-
-    Steps:
-      1) Convert geometry bounds to a clamped window in the raster.
-      2) Early return 0.0 if window is empty (outside the raster).
-      3) Slice the raster view and build a geometry mask (True=inside polygon).
-      4) Count pixels equal to the deforestation class AND inside polygon.
-      5) Multiply by pixel area (ha).
-
-    Returns:
-        Deforested area in hectares (float).
-    """
-    global _A_ARRAY, _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_DEFO_VALUE, _A_PIXEL_AREA_HA
-    if _A_ARRAY is None:
-        return 0.0
+    global _A_ARRAY, _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_DEFO_VALUE, _A_PIXEL_AREA_HA, _A_RASTER_PATH
 
     # Compute window for the geometry envelope
     row_off, col_off, h, w = _bounds_to_window(geom.bounds, _A_TRANSFORM, _A_WIDTH, _A_HEIGHT)
     if h == 0 or w == 0:
-        # Fully outside the raster extent
         return 0.0
 
-    # Slice raster
-    view = _A_ARRAY[row_off: row_off + h, col_off: col_off + w]
+    # Window transform
+    win = Window(col_off, row_off, w, h)
+    win_tf = window_transform(win, _A_TRANSFORM)
 
-    # Window-specific transform (for correct mask rasterization)
-    win_tf = window_transform(Window(col_off, row_off, w, h), _A_TRANSFORM)
-
-    # Build mask True INSIDE geometry
+    # Build mask True inside geometry
     mask_inside = geometry_mask(
         [mapping(geom)],
         out_shape=(h, w),
         transform=win_tf,
-        invert=True,   # invert=True -> True for pixels inside shapes
+        invert=True,
         all_touched=False,
     )
 
-    # Pixels that match deforestation class AND are inside the geometry
+    if _A_ARRAY is not None:
+        # SHM / memmap fast path
+        view = _A_ARRAY[row_off: row_off + h, col_off: col_off + w]
+    else:
+        # Streaming mode: open the raster file and read only the window
+        with rasterio.open(_A_RASTER_PATH) as src:
+            view = src.read(1, window=win)
+
     hits = (view == _A_DEFO_VALUE) & mask_inside
     pixels = int(np.count_nonzero(hits))
-
     return float(pixels) * float(_A_PIXEL_AREA_HA)
 
 
@@ -424,13 +413,14 @@ def alert_direct(
             results.append(metrics)
 
     else:
-        # Parallel path: try SharedMemory first; if it fails, fallback to memmap
+        # Parallel path: try SHM -> memmap -> streaming
         use_shm = False
+        use_memmap = False
         shm = None
         memmap_path = None
+        streaming = False
 
         try:
-            # Try to allocate shared memory for the raster
             from multiprocessing import shared_memory
             shm = shared_memory.SharedMemory(create=True, size=raster_arr.nbytes)
             shm_view = np.ndarray(raster_arr.shape, dtype=raster_arr.dtype, buffer=shm.buf)
@@ -438,13 +428,17 @@ def alert_direct(
             use_shm = True
         except Exception:
             # Fallback: np.memmap on disk
-            fd, memmap_path = tempfile.mkstemp(suffix=".dat", prefix="ganabosques_risk_")
-            os.close(fd)
-            mm = np.memmap(memmap_path, dtype=raster_arr.dtype, mode="w+", shape=raster_arr.shape)
-            mm[:] = raster_arr[:]
-            mm.flush()
+            try:
+                fd, memmap_path = tempfile.mkstemp(suffix=".dat", prefix="ganabosques_risk_")
+                os.close(fd)
+                mm = np.memmap(memmap_path, dtype=raster_arr.dtype, mode="w+", shape=raster_arr.shape)
+                mm[:] = raster_arr[:]
+                mm.flush()
+                use_memmap = True
+            except Exception:
+                # Final fallback: streaming mode (reopen file per window)
+                streaming = True
 
-        # Build initializer args dict (shared to all workers)
         init_kwargs = dict(
             shape=raster_arr.shape,
             dtype=str(raster_arr.dtype),
@@ -454,33 +448,30 @@ def alert_direct(
             pixel_area_ha=pixel_area_ha,
             defo_value=int(deforestation_value),
             shm_name=(shm.name if use_shm else None),
-            memmap_path=(None if use_shm else memmap_path),
+            memmap_path=(memmap_path if use_memmap else None),
             protected_union_wkb=prot_union_wkb,
             farming_union_wkb=farm_union_wkb,
+            raster_path=(deforestation if streaming else None),  # <-- clave
         )
 
-        # Submit jobs
         try:
             with ProcessPoolExecutor(
                 max_workers=int(n_workers),
                 initializer=_init_worker,
                 initargs=tuple(init_kwargs.values()),
             ) as ex:
-                # Map over plots with progress bar
                 futures = []
                 for _, row in plots.iterrows():
                     futures.append(ex.submit(_process_one, str(row[id_column]), row.geometry))
                 for f in tqdm(futures, total=len(futures), desc="Computing direct alerts (parallel)"):
                     results.append(f.result())
         finally:
-            # Clean up backing stores
             if use_shm and shm is not None:
                 try:
-                    shm.close()
-                    shm.unlink()
+                    shm.close(); shm.unlink()
                 except Exception:
                     pass
-            if (not use_shm) and memmap_path is not None:
+            if use_memmap and memmap_path is not None:
                 try:
                     os.remove(memmap_path)
                 except Exception:
