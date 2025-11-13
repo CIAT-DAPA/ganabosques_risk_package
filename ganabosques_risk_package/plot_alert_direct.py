@@ -37,7 +37,7 @@ from rasterio.features import geometry_mask
 from shapely.geometry import mapping
 from shapely.ops import unary_union
 from shapely import wkb
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
 
@@ -330,6 +330,7 @@ def alert_direct(
     # ------------------------
     # Load raster (once)
     # ------------------------
+    print(f"[Package] Opening deforestation file {deforestation}")
     with rasterio.open(deforestation) as src:
         raster_arr = src.read(1)  # (H, W)
         transform = src.transform
@@ -345,6 +346,7 @@ def alert_direct(
     # Load vectors (once)
     # ------------------------
     # Read protected and farming layers
+    print(f"[Package] Loading shapefiles protected areas={protected_areas}, farming areas={farming_areas}")
     prot = gpd.read_file(protected_areas)
     farm = gpd.read_file(farming_areas)
 
@@ -362,16 +364,19 @@ def alert_direct(
             farm = farm.to_crs(raster_crs)
 
     # Prepare unions for fast intersection (can be None if empty)
+    print(f"[Package] Preparing unions for fast intersection")
     prot_union = unary_union(prot.geometry) if (len(prot) > 0 and prot.geometry.notnull().any()) else None
     farm_union = unary_union(farm.geometry) if (len(farm) > 0 and farm.geometry.notnull().any()) else None
 
     # Encode unions as WKB for safe pickling to workers
+    print(f"[Package] Encoding unions as WKB for safe pickling to workers")
     prot_union_wkb = wkb.dumps(prot_union) if prot_union else None
     farm_union_wkb = wkb.dumps(farm_union) if farm_union else None
 
     # ------------------------
     # Prepare plots (reproject & clean)
     # ------------------------
+    print(f"[Package] Preparing plots (reproject & clean)")
     plots = plots[[id_column, "geometry"]].copy()
 
     # If plots has no CRS and raster has CRS, we assume they are in the raster CRS
@@ -391,6 +396,7 @@ def alert_direct(
     results: List[Dict] = []
 
     if n_workers <= 1 or len(plots) == 0:
+        print(f"[Package] Working serial")
         # --- Serial path: set globals directly (no SHM/memmap needed) ---
         global _A_ARRAY, _A_SHAPE, _A_DTYPE
         global _A_TRANSFORM, _A_WIDTH, _A_HEIGHT, _A_PIXEL_AREA_HA, _A_DEFO_VALUE
@@ -410,11 +416,12 @@ def alert_direct(
         _G_FARMING_UNION = farm_union
 
         # Iterate plots one by one (serial)
-        for _, row in tqdm(plots.iterrows(), total=len(plots), desc="Computing direct alerts (serial)"):
+        for _, row in tqdm(plots.iterrows(), total=len(plots), desc="[Package] Computing direct alerts (serial)"):
             metrics = _process_one(plot_id=str(row[id_column]), geom=row.geometry)
             results.append(metrics)
 
     else:
+        print(f"[Package] Exploring parallel options")
         # Parallel path: try SHM -> memmap -> streaming
         use_shm = False
         use_memmap = False
@@ -423,6 +430,7 @@ def alert_direct(
         streaming = False
 
         try:
+            print(f"[Package] Trying SHM")
             from multiprocessing import shared_memory
             shm = shared_memory.SharedMemory(create=True, size=raster_arr.nbytes)
             shm_view = np.ndarray(raster_arr.shape, dtype=raster_arr.dtype, buffer=shm.buf)
@@ -430,7 +438,9 @@ def alert_direct(
             use_shm = True
         except Exception:
             # Fallback: np.memmap on disk
+            print(f"[Package] Fail SHM")
             try:
+                print(f"[Package] Trying memmap")
                 fd, memmap_path = tempfile.mkstemp(suffix=".dat", prefix="ganabosques_risk_")
                 os.close(fd)
                 mm = np.memmap(memmap_path, dtype=raster_arr.dtype, mode="w+", shape=raster_arr.shape)
@@ -438,8 +448,10 @@ def alert_direct(
                 mm.flush()
                 use_memmap = True
             except Exception:
+                print(f"[Package] Fail memmap")
                 # Final fallback: streaming mode (reopen file per window)
                 streaming = True
+                print(f"[Package] Parallelism in streaming")
 
         init_kwargs = dict(
             shape=raster_arr.shape,
@@ -457,6 +469,7 @@ def alert_direct(
         )
 
         try:
+            print(f"[Package] Running in parallel")
             with ProcessPoolExecutor(
                 max_workers=int(n_workers),
                 initializer=_init_worker,
@@ -465,9 +478,14 @@ def alert_direct(
                 futures = []
                 for _, row in plots.iterrows():
                     futures.append(ex.submit(_process_one, str(row[id_column]), row.geometry))
-                for f in tqdm(futures, total=len(futures), desc="Computing direct alerts (parallel)"):
-                    results.append(f.result())
+                #for f in tqdm(futures, total=len(futures), desc="[Package] Computing direct alerts (parallel)"):
+                #    results.append(f.result())
+                with tqdm(total=len(futures), desc="[Package] Computing direct alerts (parallel)") as pbar:
+                    for fut in as_completed(futures):
+                        results.append(fut.result())
+                        pbar.update(1)
         finally:
+            print(f"[Package] Closing parallel")
             if use_shm and shm is not None:
                 try:
                     shm.close(); shm.unlink()
@@ -482,6 +500,7 @@ def alert_direct(
     # ------------------------
     # Build final DataFrame (stable schema/order)
     # ------------------------
+    print(f"[Package] Building final DataFrame")
     out = pd.DataFrame(results)
     # Ensure column order
     cols = [
