@@ -27,8 +27,10 @@ setup(
         "python-dateutil==2.9.0.post0",
         "pytz==2025.2",
         "rasterio==1.4.3",
+        "rasterstats==0.20.0",
         "sentinels==1.0.0",
         "shapely==2.1.1",
+        "simplejson==3.20.2",
         "six==1.17.0",
         "tqdm==4.67.1",
         "tzdata==2025.2"
