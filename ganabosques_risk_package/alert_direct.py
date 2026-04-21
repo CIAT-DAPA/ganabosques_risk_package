@@ -89,6 +89,26 @@ def _open_raster(path: str, target_crs: str = "EPSG:3116"):
     else:
         return WarpedVRT(src, crs=target_crs)
 
+def _clean_geom(geom):
+    if geom.is_empty:
+        return None
+
+    if geom.geom_type == "Polygon":
+        return geom
+
+    if geom.geom_type == "MultiPolygon":
+        return geom
+
+    if geom.geom_type == "GeometryCollection":
+        polys = [
+            g for g in geom.geoms
+            if g.geom_type in ("Polygon", "MultiPolygon")
+        ]
+        if not polys:
+            return None
+        return unary_union(polys)
+
+    return None
 
 def _calculate_deforestation_for_plot(
     src,
@@ -112,6 +132,7 @@ def _calculate_deforestation_for_plot(
     """
     try:
         src_crs = src.crs.to_string() if src.crs else None
+        geom = _clean_geom(geom)
         geom_for_mask = geom
 
         # Si el raster tiene CRS distinto, transformar geometría al CRS del raster
