@@ -29,7 +29,7 @@ import pandas as pd
 DEFAULT_ENTERPRISE_TYPES = [
     "SLAUGHTERHOUSE",
     "CATTLE_FAIR",
-    "PROCESSOR",
+    "COLLECTION_CENTER",
     "ENTERPRISE",
 ]
 
@@ -109,7 +109,7 @@ def alert_enterprise(
         Columna de ID en ``total_risk_df``.
     enterprise_types : list of str, optional
         Tipos de empresa a considerar.
-        Default: ``["SLAUGHTERHOUSE", "CATTLE_FAIR", "PROCESSOR", "ENTERPRISE"]``.
+        Default: ``["SLAUGHTERHOUSE", "CATTLE_FAIR", "COLLECTION_CENTER", "ENTERPRISE"]``.
     alert_columns : list of str, optional
         Columnas booleanas que definen si una finca tiene alerta.
         Default: ``["direct_alert", "indirect_alert_in", "indirect_alert_out"]``.
