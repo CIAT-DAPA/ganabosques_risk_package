@@ -97,6 +97,7 @@ def alert_indirect(
     >>> movements = pd.read_csv("movements.csv")
     >>> indirect = alert_indirect(direct, movements)
     """
+    
     # -------------------------------------------------------------------------
     # Validaciones
     # -------------------------------------------------------------------------
@@ -105,6 +106,7 @@ def alert_indirect(
             f"alert_direct_df debe contener columna '{id_column}'. "
             f"Columnas: {list(alert_direct_df.columns)}"
         )
+
     if "direct_alert" not in alert_direct_df.columns:
         raise ValueError(
             "alert_direct_df debe contener columna 'direct_alert'."
@@ -120,73 +122,83 @@ def alert_indirect(
 
     t0 = time.perf_counter()
 
-    # -------------------------------------------------------------------------
-    # Preparar datos
-    # -------------------------------------------------------------------------
-    # Construir diccionario id -> tiene_alerta
-    alert_ids_bool = {
-        str(row[id_column]): _str_bool(row["direct_alert"])
-        for _, row in alert_direct_df.iterrows()
-    }
+    # ---------------------------------------------------------------------
+    # Preparación (vectorizada)
+    # ---------------------------------------------------------------------
+    alert_df = alert_direct_df[[id_column, "direct_alert"]].copy()
+    alert_df[id_column] = alert_df[id_column].astype(str)
 
-    # Normalizar IDs en movimientos a string
+    alert_series = (
+        alert_df
+        .set_index(id_column)["direct_alert"]
+        .map(_str_bool)
+    )
+
     mov = movements_df.copy()
     mov["origen_id"] = mov["origen_id"].astype(str)
     mov["destination_id"] = mov["destination_id"].astype(str)
 
+    # ---------------------------------------------------------------------
     # Diagnóstico
-    ids_alerta = set(alert_ids_bool.keys())
+    # ---------------------------------------------------------------------
+    ids_alerta = set(alert_series.index)
     origenes = set(mov["origen_id"].unique())
     destinos = set(mov["destination_id"].unique())
     universo_mov = origenes | destinos
     inter = ids_alerta & universo_mov
 
-    n_alertados = sum(alert_ids_bool.values())
-    n_total = len(alert_ids_bool)
-    n_mov = len(mov)
-
     if show_progress:
         print(f"🔄 Calculando alertas indirectas:")
-        print(f"   • Predios: {n_total:,} ({n_alertados:,} con alerta directa)")
-        print(f"   • Movimientos: {n_mov:,}")
-        print(f"   • Cruce IDs (alertas ∩ movimientos): {len(inter):,}")
+        print(f"   • Predios: {len(ids_alerta):,}")
+        print(f"   • Movimientos: {len(mov):,}")
+        print(f"   • Cruce IDs: {len(inter):,}")
 
     if len(inter) == 0:
         logging.warning(
-            "No hay cruce de IDs entre alertas y movimientos. "
-            "Verifica que los IDs estén normalizados."
+            "No hay cruce de IDs entre alertas y movimientos."
         )
 
-    # -------------------------------------------------------------------------
-    # Marcar movimientos con alerta en origen/destino
-    # -------------------------------------------------------------------------
-    mov["origin_has_alert"] = mov["origen_id"].map(
-        lambda k: bool(alert_ids_bool.get(k, False))
+    # ---------------------------------------------------------------------
+    # Flags de alerta 
+    # ---------------------------------------------------------------------
+    mov["origin_has_alert"] = mov["origen_id"].map(alert_series).fillna(False).astype(bool)
+    mov["dest_has_alert"] = mov["destination_id"].map(alert_series).fillna(False).astype(bool)
+
+    # ---------------------------------------------------------------------
+    # Universo de IDs a reportar (todos los de alert_direct_df)
+    # ---------------------------------------------------------------------
+    ids = pd.Index(alert_series.index)
+
+    # ---------------------------------------------------------------------
+    # Agregaciones 
+    # ---------------------------------------------------------------------
+    n_in = mov.groupby("destination_id").size().reindex(ids, fill_value=0)
+    n_out = mov.groupby("origen_id").size().reindex(ids, fill_value=0)
+
+    n_indirect_in = (
+        mov.loc[mov["origin_has_alert"]]
+        .groupby("destination_id")
+        .size()
+        .reindex(ids, fill_value=0)
     )
-    mov["dest_has_alert"] = mov["destination_id"].map(
-        lambda k: bool(alert_ids_bool.get(k, False))
+
+    n_indirect_out = (
+        mov.loc[mov["dest_has_alert"]]
+        .groupby("origen_id")
+        .size()
+        .reindex(ids, fill_value=0)
     )
 
-    # -------------------------------------------------------------------------
-    # Calcular métricas
-    # -------------------------------------------------------------------------
-    ids = pd.Index(sorted(alert_ids_bool.keys()))
-
-    # Total de movimientos entrantes/salientes por predio
-    n_in = mov.groupby("destination_id").size().reindex(ids).fillna(0).astype(int)
-    n_out = mov.groupby("origen_id").size().reindex(ids).fillna(0).astype(int)
-
-    # Movimientos indirectos (desde/hacia predios con alerta directa)
-    tmp_in = mov[mov["origin_has_alert"]].groupby("destination_id").size()
-    tmp_out = mov[mov["dest_has_alert"]].groupby("origen_id").size()
-
+    # ---------------------------------------------------------------------
+    # Resultado final
+    # ---------------------------------------------------------------------
     result = pd.DataFrame({
         "id": ids,
-        "n_in": n_in.values,
-        "n_out": n_out.values,
-        "n_indirect_in": tmp_in.reindex(ids).fillna(0).astype(int).values,
-        "n_indirect_out": tmp_out.reindex(ids).fillna(0).astype(int).values,
-    })
+        "n_in": n_in,
+        "n_out": n_out,
+        "n_indirect_in": n_indirect_in,
+        "n_indirect_out": n_indirect_out,
+    }).reset_index(drop=True)
 
     result["n_total_mov"] = result["n_in"] + result["n_out"]
     result["indirect_alert_in"] = result["n_indirect_in"] > 0
@@ -194,12 +206,9 @@ def alert_indirect(
 
     elapsed = time.perf_counter() - t0
 
-    # Estadísticas
-    n_alert_in = result["indirect_alert_in"].sum()
-    n_alert_out = result["indirect_alert_out"].sum()
     if show_progress:
-        print(f"✅ Alertas indirectas: {n_total:,} predios en {elapsed:.2f}s")
-        print(f"   📊 Con alerta IN (recibe de alertado): {n_alert_in:,}")
-        print(f"   📊 Con alerta OUT (envía a alertado): {n_alert_out:,}")
+        print(f"✅ Listo en {elapsed:.2f}s")
+        print(f"   📊 IN: {result['indirect_alert_in'].sum():,}")
+        print(f"   📊 OUT: {result['indirect_alert_out'].sum():,}")
 
     return result
