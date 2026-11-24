@@ -2,9 +2,11 @@ name: Ganabosques Risk Package CI/CD
 
 on:
   push:
-    branches: [ "main", "stage" ]
+    branches: [ "main", "stage", "develop" ]
     tags:
       - 'v*'
+  pull_request:
+    branches: [ "main", "stage", "develop" ]
 
 permissions:
   contents: read
@@ -15,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
@@ -26,13 +28,19 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Check package installs
+        run: |
+          pip install .
+
       - name: Run Unit Tests
         run: |
-          python -m unittest tests.test_plot_alert_indirect -v
-          python -m unittest tests.test_entity_alert -v
+          python -m unittest discover -s tests -t . -v
 
   MergeToMain:
     needs: [TestGanabosquesRisk]
+    # develop y los pull requests solo corren tests: nunca hacen merge ni release.
+    # (ReleaseGanabosquesRisk depende de este job, así que también se omite.)
+    if: github.event_name == 'push' && github.ref != 'refs/heads/develop'
     name: Merge Stage with Main
     permissions: write-all
     runs-on: ubuntu-latest
@@ -100,10 +108,14 @@ jobs:
           asset_content_type: application/zip
 
       - name: Update version in setup.py
+        # Acepta comillas simples o dobles y quita la "v" del tag (v0.1.5 -> 0.1.5).
+        # Falla si no encuentra la versión, en vez de no hacer nada en silencio.
         run: |
-          sed -i "s/version='.*'/version='${{ steps.taggerDryRun.outputs.new_tag }}'/" setup.py
+          VERSION="${NEW_TAG#v}"
+          sed -i -E "s/version=[\"'][^\"']*[\"']/version=\"${VERSION}\"/" setup.py
+          grep -q "version=\"${VERSION}\"" setup.py || { echo "No se pudo actualizar la versión en setup.py"; exit 1; }
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ steps.taggerDryRun.outputs.new_tag }}
 
       - name: Commit version bump
         uses: stefanzweifel/git-auto-commit-action@v4

@@ -10,10 +10,9 @@
 # Notes:
 #   - Uses pandas/numpy/tqdm and optional multiprocessing for assigning results back to the alert_direct table.
 #   - Progress is displayed with tqdm over chunked processing of plot IDs.
+#   - Accepts both the legacy plot_alert_* output and the new total_risk() output
+#     (see _adapt_new_api_columns for the column mapping).
 from __future__ import annotations
-
-import warnings
-warnings.filterwarnings("ignore")
 
 from typing import List
 from concurrent.futures import ProcessPoolExecutor
@@ -22,10 +21,39 @@ import math
 import pandas as pd
 from tqdm import tqdm
 
+from ._utils import normalize_id_series, str_bool
+
 
 # ----------------------------
 # Validation & Normalization
 # ----------------------------
+
+# Columnas de la API nueva (total_risk) -> columnas de la API vieja.
+# OJO: "in"/"out" tienen significados opuestos entre ambas APIs:
+#   - nuevo indirect_alert_out (la finca ENVÍA a un predio con alerta) == viejo alert_in
+#   - nuevo indirect_alert_in  (la finca RECIBE de un predio con alerta) == viejo alert_out
+_NEW_TO_LEGACY = {
+    "direct_alert": "alert_direct",
+    "deforested_ha": "deforested_area",
+    "indirect_alert_out": "alert_in",
+    "indirect_alert_in": "alert_out",
+}
+
+
+def _adapt_new_api_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Si ``df`` viene de la API nueva (``total_risk``), renombra sus columnas al
+    esquema que espera ``calculate_alert``. Si ya trae el esquema viejo, no cambia."""
+    legacy = set(_NEW_TO_LEGACY.values())
+    if legacy.issubset(df.columns):
+        return df
+    rename = {
+        new: old for new, old in _NEW_TO_LEGACY.items()
+        if new in df.columns and old not in df.columns
+    }
+    if not rename:
+        return df
+    return df.drop(columns=[c for c in rename.values() if c in df.columns]).rename(columns=rename)
+
 
 def _validate_alert_indirect(df: pd.DataFrame) -> None:
     """Validate required columns in alert_indirect dataframe.
@@ -48,7 +76,8 @@ def _normalize_alert_indirect(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["deforested_area"] = pd.to_numeric(out["deforested_area"], errors="coerce").fillna(0.0)
     for b in ["alert_direct", "alert_in", "alert_out"]:
-        out[b] = out[b].fillna(False).astype(bool)
+        # str_bool: NaN/None/"no_info" -> False ("no_info".astype(bool) sería True)
+        out[b] = out[b].map(str_bool).astype(bool)
     return out
 
 
@@ -187,13 +216,17 @@ def calculate_alert(
 
     Args:
         alert_indirect_df:
-            DataFrame con las fincas (plots) y sus métricas/flags, generado por `alert_indirect`.
-            Debe incluir:
-              - 'id'              (plot id)
-              - 'deforested_area' (float; ha)
-              - 'alert_direct'    (bool)
-              - 'alert_in'        (bool)
-              - 'alert_out'       (bool)
+            DataFrame con las fincas (plots) y sus métricas/flags. Acepta dos formatos:
+
+            * API vieja (``plot_alert_indirect.alert_indirect``):
+              'id', 'deforested_area', 'alert_direct', 'alert_in', 'alert_out'.
+            * API nueva (``total_risk``): 'id', 'deforested_ha', 'direct_alert',
+              'indirect_alert_in', 'indirect_alert_out'. Se traduce así:
+              indirect_alert_out -> alert_in (la finca envía a un predio con alerta) y
+              indirect_alert_in -> alert_out (la finca recibe de un predio con alerta).
+
+            Los IDs de predio se normalizan para el cruce con ``provider_df``
+            (``101``, ``101.0`` y ``"0101"`` son el mismo predio).
         entity_df:
             DataFrame maestro de la entidad destino. Se normaliza a:
               - 'entity_id'
@@ -219,26 +252,31 @@ def calculate_alert(
           - alert   (True si existe algún plot con direct OR in OR out)
     """
     # --- Validate & normalize inputs ---
+    alert_indirect_df = _adapt_new_api_columns(alert_indirect_df)
     _validate_alert_indirect(alert_indirect_df)
     plots = _normalize_alert_indirect(alert_indirect_df)
     entity = _normalize_entity(entity_df)
     provider = _normalize_provider(provider_df)
 
+    # Claves normalizadas para el cruce: evita que 101 (int) vs "101" (str)
+    # no crucen, o que pandas falle al unir columnas int64 con object.
+    plots["_plot_key"] = normalize_id_series(plots["id"])
+    provider["_plot_key"] = normalize_id_series(provider["plot_id"])
+
     # --- Build a single merged table: provider × plots (keeps only provider-linked plots) ---
     # Right semantics: we want all provider relations (plots linked to entities)
     merged = provider.merge(
         plots,
-        left_on="plot_id",
-        right_on="id",
+        on="_plot_key",
         how="left",
-    )
+    ).drop(columns="_plot_key")
 
     # If some provider mapping points to plots not present in alert_indirect_df,
     # fill defaults so they contribute safely to counts (non-alert, area 0).
     # (This is conservative; adjust if you prefer dropping those rows.)
     merged["deforested_area"] = pd.to_numeric(merged["deforested_area"], errors="coerce").fillna(0.0)
     for b in ["alert_direct", "alert_in", "alert_out"]:
-        merged[b] = merged[b].fillna(False).astype(bool)
+        merged[b] = merged[b].map(str_bool).astype(bool)
 
     # --- Compute per-entity metrics in parallel ---
     all_entity_ids = entity["entity_id"].drop_duplicates().tolist()
@@ -270,7 +308,7 @@ def calculate_alert(
     out["plots_alert_in"] = out["plots_alert_in"].fillna(0).astype(int)
     out["plots_alert_out"] = out["plots_alert_out"].fillna(0).astype(int)
     out["deforested_area_sum"] = out["deforested_area_sum"].fillna(0.0).astype(float)
-    out["alert"] = out["alert"].fillna(False).astype(bool)
+    out["alert"] = out["alert"].eq(True)
 
     # Stable column order
     out = out[

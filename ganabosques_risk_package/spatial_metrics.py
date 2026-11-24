@@ -23,6 +23,8 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+from ._utils import echo
 import geopandas as gpd
 from shapely.geometry.base import BaseGeometry
 from tqdm import tqdm
@@ -194,7 +196,7 @@ def spatial_metrics(
     >>> farming = gpd.read_file("frontera_agricola.shp")
     >>> protected = gpd.read_file("pnn_areas.shp")
     >>> metrics = spatial_metrics(plots, farming_areas=farming, protected_areas=protected)
-    >>> print(metrics.head())
+    >>> echo(metrics.head())
     """
     # -------------------------------------------------------------------------
     # Validaciones
@@ -250,7 +252,7 @@ def spatial_metrics(
     # Calcular métricas por predio
     # -------------------------------------------------------------------------
     n_plots = len(plots_proj)
-    print(f"📐 Calculando métricas espaciales para {n_plots:,} predios...")
+    echo(f"📐 Calculando métricas espaciales para {n_plots:,} predios...")
 
     rows = []
 
@@ -289,7 +291,7 @@ def spatial_metrics(
         })
 
     elapsed = time.perf_counter() - t0
-    print(f"✅ Métricas calculadas: {n_plots:,} predios en {elapsed:.2f}s")
+    echo(f"✅ Métricas calculadas: {n_plots:,} predios en {elapsed:.2f}s")
 
     # -------------------------------------------------------------------------
     # Construir DataFrame resultado

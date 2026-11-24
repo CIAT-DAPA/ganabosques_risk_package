@@ -23,23 +23,8 @@ import time
 from typing import Optional
 
 import pandas as pd
-from tqdm import tqdm
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _str_bool(x) -> bool:
-    """Convierte valor a booleano, tolerando strings 'True'/'False'."""
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        return x.strip().lower() in ("true", "1", "yes", "si", "sí")
-    try:
-        return bool(x)
-    except Exception:
-        return False
+from ._utils import echo, normalize_id_series, str_bool
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +35,7 @@ def alert_indirect(
     alert_direct_df: pd.DataFrame,
     movements_df: pd.DataFrame,
     id_column: str = "id",
+    normalize_ids: bool = True,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """Calcula alertas indirectas basadas en movimientos entre predios.
@@ -70,13 +56,20 @@ def alert_indirect(
         Puede contener columnas adicionales (date, tipo, etc.) que se ignoran.
     id_column : str, default "id"
         Nombre de la columna de ID en ``alert_direct_df``.
+    normalize_ids : bool, default True
+        Si True, los IDs se normalizan **solo para el cruce** (``1``, ``1.0``,
+        ``"0001"`` se consideran el mismo predio), igual que en
+        ``alert_enterprise`` y ``supplier_risk``. La columna ``id`` de salida
+        conserva el valor original (como string), para que siga empatando con
+        la salida de ``alert_direct`` en ``total_risk``.
     show_progress : bool, default True
         Mostrar información de progreso.
 
     Returns
     -------
     pandas.DataFrame
-        Una fila por predio (mismo universo que alert_direct_df) con:
+        Una fila por ID único de alert_direct_df (si un ID aparece varias
+        veces, se considera alertado si cualquiera de sus filas lo está) con:
           - id: identificador del predio
           - n_in: total de movimientos entrantes
           - n_out: total de movimientos salientes
@@ -125,33 +118,44 @@ def alert_indirect(
     # ---------------------------------------------------------------------
     # Preparación (vectorizada)
     # ---------------------------------------------------------------------
+    def _keys(series: pd.Series) -> pd.Series:
+        if normalize_ids:
+            return normalize_id_series(series)
+        return series.astype(str)
+
     alert_df = alert_direct_df[[id_column, "direct_alert"]].copy()
-    alert_df[id_column] = alert_df[id_column].astype(str)
+    alert_df["_orig_id"] = alert_df[id_column].astype(str)
+    alert_df["_key"] = _keys(alert_df[id_column])
+    alert_df["_alert"] = alert_df["direct_alert"].map(str_bool).astype(bool)
 
-    alert_series = (
-        alert_df
-        .set_index(id_column)["direct_alert"]
-        .map(_str_bool)
-    )
+    n_dup = int(alert_df["_orig_id"].duplicated().sum())
+    if n_dup:
+        logging.warning(
+            f"alert_direct_df tiene {n_dup:,} IDs duplicados; se reporta una fila "
+            "por ID (alertado si cualquiera de sus filas lo está)."
+        )
 
-    mov = movements_df.copy()
-    mov["origen_id"] = mov["origen_id"].astype(str)
-    mov["destination_id"] = mov["destination_id"].astype(str)
+    # Alerta por clave normalizada (any() por si hay duplicados). La clave
+    # vacía corresponde a IDs faltantes y nunca debe cruzar con movimientos.
+    alert_series = alert_df.groupby("_key", sort=False)["_alert"].any()
+    alert_series = alert_series[alert_series.index != ""]
+
+    mov = movements_df[["origen_id", "destination_id"]].copy()
+    mov["_o"] = _keys(mov["origen_id"])
+    mov["_d"] = _keys(mov["destination_id"])
 
     # ---------------------------------------------------------------------
     # Diagnóstico
     # ---------------------------------------------------------------------
     ids_alerta = set(alert_series.index)
-    origenes = set(mov["origen_id"].unique())
-    destinos = set(mov["destination_id"].unique())
-    universo_mov = origenes | destinos
+    universo_mov = set(mov["_o"].unique()) | set(mov["_d"].unique())
     inter = ids_alerta & universo_mov
 
     if show_progress:
-        print(f"🔄 Calculando alertas indirectas:")
-        print(f"   • Predios: {len(ids_alerta):,}")
-        print(f"   • Movimientos: {len(mov):,}")
-        print(f"   • Cruce IDs: {len(inter):,}")
+        echo(f"🔄 Calculando alertas indirectas:")
+        echo(f"   • Predios: {len(ids_alerta):,}")
+        echo(f"   • Movimientos: {len(mov):,}")
+        echo(f"   • Cruce IDs: {len(inter):,}")
 
     if len(inter) == 0:
         logging.warning(
@@ -159,46 +163,42 @@ def alert_indirect(
         )
 
     # ---------------------------------------------------------------------
-    # Flags de alerta 
+    # Flags de alerta (claves sin predio conocido -> False)
     # ---------------------------------------------------------------------
-    mov["origin_has_alert"] = mov["origen_id"].map(alert_series).fillna(False).astype(bool)
-    mov["dest_has_alert"] = mov["destination_id"].map(alert_series).fillna(False).astype(bool)
+    mov["origin_has_alert"] = mov["_o"].map(alert_series).eq(True)
+    mov["dest_has_alert"] = mov["_d"].map(alert_series).eq(True)
 
     # ---------------------------------------------------------------------
-    # Universo de IDs a reportar (todos los de alert_direct_df)
+    # Agregaciones por clave
     # ---------------------------------------------------------------------
-    ids = pd.Index(alert_series.index)
+    keys = pd.Index(alert_series.index)
+
+    per_key = pd.DataFrame({
+        "n_in": mov.groupby("_d").size().reindex(keys, fill_value=0),
+        "n_out": mov.groupby("_o").size().reindex(keys, fill_value=0),
+        "n_indirect_in": (
+            mov.loc[mov["origin_has_alert"]].groupby("_d").size()
+            .reindex(keys, fill_value=0)
+        ),
+        "n_indirect_out": (
+            mov.loc[mov["dest_has_alert"]].groupby("_o").size()
+            .reindex(keys, fill_value=0)
+        ),
+    }, index=keys)
 
     # ---------------------------------------------------------------------
-    # Agregaciones 
+    # Resultado final: una fila por ID original (orden de alert_direct_df)
     # ---------------------------------------------------------------------
-    n_in = mov.groupby("destination_id").size().reindex(ids, fill_value=0)
-    n_out = mov.groupby("origen_id").size().reindex(ids, fill_value=0)
-
-    n_indirect_in = (
-        mov.loc[mov["origin_has_alert"]]
-        .groupby("destination_id")
-        .size()
-        .reindex(ids, fill_value=0)
+    count_cols = ["n_in", "n_out", "n_indirect_in", "n_indirect_out"]
+    result = (
+        alert_df[["_orig_id", "_key"]]
+        .drop_duplicates("_orig_id")
+        .join(per_key, on="_key")
+        .drop(columns="_key")
+        .rename(columns={"_orig_id": "id"})
+        .reset_index(drop=True)
     )
-
-    n_indirect_out = (
-        mov.loc[mov["dest_has_alert"]]
-        .groupby("origen_id")
-        .size()
-        .reindex(ids, fill_value=0)
-    )
-
-    # ---------------------------------------------------------------------
-    # Resultado final
-    # ---------------------------------------------------------------------
-    result = pd.DataFrame({
-        "id": ids,
-        "n_in": n_in,
-        "n_out": n_out,
-        "n_indirect_in": n_indirect_in,
-        "n_indirect_out": n_indirect_out,
-    }).reset_index(drop=True)
+    result[count_cols] = result[count_cols].fillna(0).astype(int)
 
     result["n_total_mov"] = result["n_in"] + result["n_out"]
     result["indirect_alert_in"] = result["n_indirect_in"] > 0
@@ -207,8 +207,8 @@ def alert_indirect(
     elapsed = time.perf_counter() - t0
 
     if show_progress:
-        print(f"✅ Listo en {elapsed:.2f}s")
-        print(f"   📊 IN: {result['indirect_alert_in'].sum():,}")
-        print(f"   📊 OUT: {result['indirect_alert_out'].sum():,}")
+        echo(f"✅ Listo en {elapsed:.2f}s")
+        echo(f"   📊 IN: {result['indirect_alert_in'].sum():,}")
+        echo(f"   📊 OUT: {result['indirect_alert_out'].sum():,}")
 
     return result
