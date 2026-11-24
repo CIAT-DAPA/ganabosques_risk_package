@@ -70,6 +70,8 @@ print(supplier_risk_summary(sup_risk))
 
 All functions accept `show_progress=False` to silence the console summary.
 
+**Overlapping plots:** each plot is evaluated independently. If two plots with different IDs overlap, the shared area counts for both, so sums across plots (e.g. `total_deforested_ha`, `deforested_area_sum`) count it once per plot.
+
 ### `spatial_metrics(plots, farming_areas=None, protected_areas=None, crs="EPSG:3116", id_column="id")`
 
 Area of each plot inside/outside the agricultural frontier and inside protected areas. All layers are reprojected to `crs` (a projected CRS in metres).
