@@ -15,11 +15,12 @@ Public API:
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import List, Optional
 
 import pandas as pd
+
+from ._utils import echo, normalize_id as _normalize_id, str_bool as _str_bool
 
 
 # ---------------------------------------------------------------------------
@@ -32,38 +33,6 @@ DEFAULT_ENTERPRISE_TYPES = [
     "COLLECTION_CENTER",
     "ENTERPRISE",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Utilidades internas
-# ---------------------------------------------------------------------------
-
-def _normalize_id(value) -> str:
-    """Normaliza un ID a string limpio (mayúsculas, sin ceros a la izq.)."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    s = str(value).strip()
-    if s.lower() == "nan":
-        return ""
-    # Quitar .0 de números flotantes
-    if re.match(r"^\d+\.0$", s):
-        s = s[:-2]
-    # Quitar ceros a la izquierda
-    if re.match(r"^0*\d+$", s):
-        s = str(int(s))
-    return s.upper()
-
-
-def _str_bool(x) -> bool:
-    """Convierte valor a booleano."""
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        return x.strip().lower() in ("true", "1", "yes", "y", "si", "sí", "t")
-    try:
-        return bool(x)
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +155,7 @@ def alert_enterprise(
             )
 
     if show_progress:
-        print(f"🏭 Buscando alertas de empresa para {len(farms_with_alert):,} "
+        echo(f"🏭 Buscando alertas de empresa para {len(farms_with_alert):,} "
               f"fincas alertadas en {len(movements_df):,} movimientos")
 
     # ------------------------------------------------------------------
@@ -229,15 +198,28 @@ def alert_enterprise(
     # 3. Finca → Empresa  (typemove = "in")
     #    origen = finca alertada, destino = tipo empresa
     # ------------------------------------------------------------------
+    # Heurística cuando faltan tipos: un ID que aparece en total_risk_df es
+    # una finca conocida, por lo tanto no es una empresa.
+    known_farms = set(risk[id_column].unique())
+
     has_tipo_destino = "tipo_destino" in mov.columns
+    has_tipo_origen = "tipo_origen" in mov.columns
+    if not (has_tipo_destino and has_tipo_origen):
+        logging.warning(
+            "movements_df no trae 'tipo_origen'/'tipo_destino'; se considera "
+            "empresa a todo ID que no esté en total_risk_df."
+        )
+
     if has_tipo_destino:
         mask_to_ent = (
             mov["origen_id"].isin(farms_with_alert) &
             mov["tipo_destino"].isin(enterprise_types)
         )
     else:
-        # Sin tipo, tomar todos los destinos que NO sean fincas (heurística)
-        mask_to_ent = mov["origen_id"].isin(farms_with_alert)
+        mask_to_ent = (
+            mov["origen_id"].isin(farms_with_alert) &
+            ~mov["destination_id"].isin(known_farms)
+        )
 
     entries = mov[mask_to_ent].copy()
     entries["typemove"] = "in"
@@ -255,14 +237,16 @@ def alert_enterprise(
     # 4. Empresa → Finca  (typemove = "out")
     #    origen = tipo empresa, destino = finca alertada
     # ------------------------------------------------------------------
-    has_tipo_origen = "tipo_origen" in mov.columns
     if has_tipo_origen:
         mask_from_ent = (
             mov["destination_id"].isin(farms_with_alert) &
             mov["tipo_origen"].isin(enterprise_types)
         )
     else:
-        mask_from_ent = mov["destination_id"].isin(farms_with_alert)
+        mask_from_ent = (
+            mov["destination_id"].isin(farms_with_alert) &
+            ~mov["origen_id"].isin(known_farms)
+        )
 
     exits_ = mov[mask_from_ent].copy()
     exits_["typemove"] = "out"
@@ -283,7 +267,7 @@ def alert_enterprise(
 
     if result.empty:
         if show_progress:
-            print("⚠️  No se encontraron movimientos con fincas alertadas.")
+            echo("⚠️  No se encontraron movimientos con fincas alertadas.")
         return pd.DataFrame(columns=[
             "idpro", "id_farm", "typemove", "enterprise_type",
             "farm_has_direct_alert", "farm_has_indirect_alert",
@@ -308,10 +292,10 @@ def alert_enterprise(
         n_out = (result["typemove"] == "out").sum()
         n_ent = result["idpro"].nunique()
         n_farm = result["id_farm"].nunique()
-        print(f"✅ Alertas de empresa: {len(result):,} registros en {elapsed:.2f}s")
-        print(f"   📊 Movimientos IN (finca→empresa): {n_in:,}")
-        print(f"   📊 Movimientos OUT (empresa→finca): {n_out:,}")
-        print(f"   📊 Empresas únicas: {n_ent:,}")
-        print(f"   📊 Fincas únicas involucradas: {n_farm:,}")
+        echo(f"✅ Alertas de empresa: {len(result):,} registros en {elapsed:.2f}s")
+        echo(f"   📊 Movimientos IN (finca→empresa): {n_in:,}")
+        echo(f"   📊 Movimientos OUT (empresa→finca): {n_out:,}")
+        echo(f"   📊 Empresas únicas: {n_ent:,}")
+        echo(f"   📊 Fincas únicas involucradas: {n_farm:,}")
 
     return result.reset_index(drop=True)

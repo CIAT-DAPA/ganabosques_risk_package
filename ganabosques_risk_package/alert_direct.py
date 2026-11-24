@@ -29,6 +29,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from ._utils import echo
 import geopandas as gpd
 import rasterio
 from rasterio.mask import mask as rasterio_mask
@@ -339,7 +341,7 @@ def alert_direct(
     raster_src = _open_raster(deforestation_raster, target_crs=crs)
 
     mode_label = "preciso (intersección geométrica)" if use_precise_area else "rápido (píxeles completos)"
-    print(f"🔍 Calculando alertas directas para {n_plots:,} predios [{mode_label}]")
+    echo(f"🔍 Calculando alertas directas para {n_plots:,} predios [{mode_label}]")
 
     # -------------------------------------------------------------------------
     # Procesar cada predio
@@ -381,7 +383,7 @@ def alert_direct(
         pass
 
     elapsed = time.perf_counter() - t0
-    print(f"✅ Alertas directas: {n_plots:,} predios en {elapsed:.2f}s")
+    echo(f"✅ Alertas directas: {n_plots:,} predios en {elapsed:.2f}s")
 
     # -------------------------------------------------------------------------
     # Construir DataFrame resultado
@@ -406,10 +408,10 @@ def alert_direct(
 
     # Estadísticas rápidas
     n_alert = result_df["direct_alert"].sum()
-    print(f"   📊 Predios con alerta: {n_alert:,} / {n_plots:,} ({100*n_alert/n_plots:.1f}%)")
+    echo(f"   📊 Predios con alerta: {n_alert:,} / {n_plots:,} ({100*n_alert/n_plots:.1f}%)")
     if n_alert > 0:
         avg_ha = result_df.loc[result_df["direct_alert"], "deforested_ha"].mean()
-        print(f"   📊 Deforestación promedio (con alerta): {avg_ha:.4f} ha")
+        echo(f"   📊 Deforestación promedio (con alerta): {avg_ha:.4f} ha")
 
     return result_df
 

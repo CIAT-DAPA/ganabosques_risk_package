@@ -25,6 +25,8 @@ from typing import Optional
 
 import pandas as pd
 
+from ._utils import echo, str_bool as _str_bool
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -46,16 +48,7 @@ _METRICS_COLS = [
 ]
 
 
-def _str_bool(x) -> bool:
-    """Convierte valor a booleano."""
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        return x.strip().lower() in ("true", "1", "yes")
-    try:
-        return bool(x)
-    except Exception:
-        return False
+_INDIRECT_BOOL_COLS = ["indirect_alert_in", "indirect_alert_out"]
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +127,7 @@ def total_risk(
     if show_progress:
         n = len(df)
         n_alerted = df["direct_alert"].sum()
-        print(f"📊 Consolidando riesgo total para {n:,} predios "
+        echo(f"📊 Consolidando riesgo total para {n:,} predios "
               f"({n_alerted:,} con alerta directa)")
 
     # -------------------------------------------------------------------------
@@ -143,6 +136,7 @@ def total_risk(
     if indirect_df is not None and not indirect_df.empty:
         ind = indirect_df.copy()
         ind[id_column] = ind[id_column].astype(str)
+        provided_cols = [c for c in _INDIRECT_COLS if c in ind.columns]
 
         # Asegurar columnas indirectas existen
         for c in _INDIRECT_COLS:
@@ -152,8 +146,30 @@ def total_risk(
         df = pd.merge(
             df,
             ind[[id_column] + _INDIRECT_COLS],
-            on=id_column, how="outer", copy=False,
+            on=id_column, how="outer", indicator=True,
         )
+
+        # Si direct_df e indirect_df no tienen los mismos IDs, el outer merge
+        # deja NaN. Un NaN NO es una alerta: se rellena como "sin alerta".
+        only_direct = df["_merge"] == "left_only"
+        only_indirect = df["_merge"] == "right_only"
+        if only_direct.any() or only_indirect.any():
+            logging.warning(
+                f"total_risk: IDs no coinciden entre direct_df e indirect_df "
+                f"({int(only_direct.sum()):,} solo en directas, "
+                f"{int(only_indirect.sum()):,} solo en indirectas). "
+                "Los valores faltantes se rellenan como 'sin alerta'."
+            )
+        df = df.drop(columns="_merge")
+
+        df["direct_alert"] = df["direct_alert"].map(_str_bool).astype(bool)
+        for c in ["deforested_ha", "deforested_prop"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        for c in provided_cols:  # las faltantes conservan "no_info"
+            if c in _INDIRECT_BOOL_COLS:
+                df[c] = df[c].map(_str_bool).astype(bool)
+            else:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
     else:
         # Sin datos indirectos: llenar con "no_info"
         for c in _INDIRECT_COLS:
@@ -168,7 +184,7 @@ def total_risk(
     if metrics_df is not None and not metrics_df.empty and not has_metrics_in_df:
         met = metrics_df.copy()
         met[id_column] = met[id_column].astype(str)
-        df = pd.merge(df, met, on=id_column, how="left", copy=False)
+        df = pd.merge(df, met, on=id_column, how="left")
 
     # Asegurar columnas de métricas existen (por si no se pasó nada)
     for c in _METRICS_COLS:
@@ -181,16 +197,16 @@ def total_risk(
     elapsed = time.perf_counter() - t0
 
     if show_progress:
-        print(f"✅ Riesgo total consolidado: {len(df):,} predios en {elapsed:.2f}s")
+        echo(f"✅ Riesgo total consolidado: {len(df):,} predios en {elapsed:.2f}s")
 
         # Resumen rápido
         try:
             n_direct = df["direct_alert"].sum()
             n_in = (df["indirect_alert_in"] == True).sum() if "indirect_alert_in" in df.columns else 0  # noqa
             n_out = (df["indirect_alert_out"] == True).sum() if "indirect_alert_out" in df.columns else 0  # noqa
-            print(f"   📊 Alerta directa: {n_direct:,}")
-            print(f"   📊 Alerta indirecta IN: {n_in:,}")
-            print(f"   📊 Alerta indirecta OUT: {n_out:,}")
+            echo(f"   📊 Alerta directa: {n_direct:,}")
+            echo(f"   📊 Alerta indirecta IN: {n_in:,}")
+            echo(f"   📊 Alerta indirecta OUT: {n_out:,}")
         except Exception:
             pass
 
