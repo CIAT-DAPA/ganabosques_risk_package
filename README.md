@@ -1,238 +1,198 @@
 # Ganabosques Risk Package
 
-The **Ganabosques Risk Package** provides a complete analytical workflow to compute **deforestation alerts** at the **plot level** and aggregate them to organizational or administrative entities.  
-It includes three main analytical stages:
+The **Ganabosques Risk Package** computes **deforestation risk for cattle farms** (plots) and propagates it to the companies connected to them. Every function receives and returns pandas DataFrames.
 
-1. **`alert_direct`** – Calculates **direct deforestation alerts** per plot (based on deforestation rasters, protected areas, and farming areas).  
-2. **`alert_indirect`** – Propagates **indirect alerts** through movements or connections between plots (origin/destination relationships).  
-3. **`calculate_alert`** – Aggregates all plot-level alerts into **any entity** (e.g., ADM3, associations, providers) using a mapping DataFrame (`provider`).
+Pipeline:
 
-This package supports **parallelization** (via `ProcessPoolExecutor`) and displays **progress bars** (`tqdm`), allowing it to scale efficiently for large spatial datasets.
+```
+spatial_metrics ─┐
+                 ├─► alert_direct ─► alert_indirect ─► total_risk ─┬─► alert_enterprise   (companies, via cattle movements)
+deforestation ───┘                                                 ├─► supplier_risk       (companies, via supplier relations)
+raster                                                             └─► calculate_alert     (any entity: ADM3, associations, …)
+```
 
 ---
 
 ## 📦 Installation
 
-Install directly from GitHub:
-
 ```bash
 pip install git+https://github.com/CIAT-DAPA/ganabosques_risk_package.git
 ```
 
-## 🔄 Upgrade to the latest version
+Upgrade / uninstall:
+
 ```bash
 pip install --upgrade git+https://github.com/CIAT-DAPA/ganabosques_risk_package.git
-```
-
-## ❌ Uninstall
-```bash
 pip uninstall ganabosques_risk_package
 ```
 
-# 🧠 Usage and public functions
+Requires Python ≥ 3.10. Runtime dependencies: geopandas, rasterio, shapely, pyproj, numpy, pandas (< 3), tqdm.
 
-## 1️⃣ alert_direct
+---
 
-**Module:** ganabosques_risk_package.plot_alert_direct
-
-**Description**
-Calculates per-plot intersection metrics between the deforestation raster and vector layers of protected and farming areas.
-Reports deforested areas (ha), proportions, and a boolean flag alert_direct (True if deforestation pixels are detected inside the plot).
-
-**Function signature**
+## 🚀 Quick start
 
 ```python
-alert_direct(
-    plots: gpd.GeoDataFrame,
-    deforestation: str,
-    protected_areas: str,
-    farming_areas: str,
-    deforestation_value: float = 2,
-    n_workers: int = 2,
-    id_column: str = "id",
-) -> pd.DataFrame
-```
-
-**Key parameters**
-
-* plots: GeoDataFrame of polygons representing plots.
-* deforestation: Path to the deforestation raster (GeoTIFF).
-* protected_areas: Path to a shapefile or GeoJSON of protected areas.
-* farming_areas: Path to a shapefile or GeoJSON of farming areas.
-* n_workers: Number of processes to use (parallelization).
-* id_column: Column name containing plot IDs (default "id").
-
-**Output DataFrame columns**
-
-* id, plot_area
-* deforested_area, deforested_proportion
-* protected_areas_area, protected_areas_proportion
-* farming_in_area, farming_in_proportion
-* farming_out_area, farming_out_proportion
-* alert_direct (boolean flag)
-
-**Example**
-
-```python
-from ganabosques_risk_package.plot_alert_direct import alert_direct
 import geopandas as gpd
-
-plots = gpd.read_file("data/plots.shp")
-df_direct = alert_direct(
-    plots=plots,
-    deforestation="data/deforestation.tif",
-    protected_areas="data/protected_areas.shp",
-    farming_areas="data/farming_areas.shp",
-    deforestation_value=2,
-    n_workers=4,
-)
-print(df_direct.head())
-```
-
-## 2️⃣ alert_indirect
-
-**Module:** ganabosques_risk_package.plot_alert_indirect
-
-**Description**
-Computes indirect alerts based on plot-to-plot interactions or movements (movement_df), assigning:
-
-* alert_in: True if a plot sends activity to a destination that has a direct alert.
-* alert_out: True if a plot receives activity from an origin that has a direct alert.
-
-**Function signature**
-
-```python
-alert_indirect(
-    alert_direct_df: pd.DataFrame,
-    movement_df: pd.DataFrame,
-    n_workers: int = 2,
-) -> pd.DataFrame
-```
-
-**Key parameters**
-
-* alert_direct_df: DataFrame output from alert_direct(...), containing at least id and alert_direct.
-* movement_df: DataFrame describing plot-to-plot connections with:
-* origen_id
-* destination_id
-* n_workers: Number of processes to use for parallel computation (default 2).
-
-**Output DataFrame columns**
-
-* Same as alert_direct_df, plus:
-* alert_in (bool)
-* alert_out (bool)
-
-**Example**
-
-```python
-from ganabosques_risk_package.plot_alert_indirect import alert_indirect
 import pandas as pd
+from ganabosques_risk_package import (
+    spatial_metrics, alert_direct, alert_indirect, total_risk,
+    alert_enterprise, supplier_risk, supplier_risk_summary,
+)
 
-df_direct = pd.read_parquet("outputs/alert_direct.parquet")
-movement = pd.read_parquet("data/movement.parquet")
+plots = gpd.read_file("data/plots.geojson")                  # columns: id, geometry
+farming = gpd.read_file("data/frontera_agricola.shp")
+protected = gpd.read_file("data/pnn.shp")
+movements = pd.read_csv("data/movements.csv")                # origen_id, destination_id, tipo_origen, tipo_destino
+suppliers = pd.read_csv("data/suppliers.csv")                # enterprise_id, farm_id, years
 
-df_indirect = alert_indirect(df_direct, movement, n_workers=4)
-print(df_indirect[["id", "alert_direct", "alert_in", "alert_out"]].head())
+# 1. Spatial metrics: computed once, reused for every deforestation layer
+metrics = spatial_metrics(plots, farming_areas=farming, protected_areas=protected)
+
+# 2. Direct alerts for one deforestation raster
+direct = alert_direct(plots, "data/deforestation_2023.tif", metrics_df=metrics)
+
+# 3. Indirect alerts through cattle movements
+indirect = alert_indirect(direct, movements)
+
+# 4. Consolidated risk per farm
+risk = total_risk(direct, indirect)
+
+# 5. Company risk
+ent_alerts = alert_enterprise(risk, movements)
+sup_risk = supplier_risk(risk, suppliers)
+print(supplier_risk_summary(sup_risk))
 ```
 
-## 3️⃣ calculate_alert
+---
 
-**Module:** ganabosques_risk_package.entity_alert
+## 🧠 Public functions
 
-**Description**
+All functions accept `show_progress=False` to silence the console summary.
 
-Aggregates plot-level alerts into any entity (e.g., administrative division, organization, or provider).
-Uses a mapping DataFrame (provider) that links plots (plot_id) to entities (entity_id).
-Calculates the total number of plots, the number of plots with direct and indirect alerts, total deforested area, and a final boolean flag alert indicating whether any plot has an alert.
+### `spatial_metrics(plots, farming_areas=None, protected_areas=None, crs="EPSG:3116", id_column="id")`
 
-**Function signature**
+Area of each plot inside/outside the agricultural frontier and inside protected areas. All layers are reprojected to `crs` (a projected CRS in metres).
 
-```python
-calculate_alert(
-    alert_indirect_df: pd.DataFrame,
-    entity_df: pd.DataFrame,
-    provider_df: pd.DataFrame,
-    n_workers: int = 2,
-) -> pd.DataFrame
-```
+Output: `id, total_ha, farming_in_ha, farming_in_prop, farming_out_ha, farming_out_prop, protected_ha, protected_prop`.
 
-**Key parameters**
+### `alert_direct(plots, deforestation_raster, deforestation_value=2, metrics_df=None, crs="EPSG:3116", id_column="id", use_precise_area=False)`
 
-* alert_indirect_df: Output of alert_indirect with columns id, deforested_area, alert_direct, alert_in, alert_out.
-* entity_df: Master DataFrame of entities, normalized to entity_id and entity_name (accepts variants like id, name).
-* provider_df: Mapping between plots and entities (plot_id, entity_id). Duplicates are automatically removed.
-* n_workers: Number of parallel processes to use (default 2).
+Intersects each plot with a deforestation raster.
 
-**Output DataFrame columns**
+* Default mode counts pixels whose centre falls inside the plot.
+* `use_precise_area=True` vectorises the deforested pixels and intersects them with the plot (slower, exact at the borders).
+* If `metrics_df` is given, its columns are merged into the output.
 
-* entity_id, entity_name
-* plots_total
-* plots_alert_direct
-* plots_alert_in
-* plots_alert_out
-* deforested_area_sum
-* alert (boolean flag)
+Output: `id, deforested_ha, deforested_prop, direct_alert` (+ metric columns).
 
-**Example**
+### `alert_indirect(alert_direct_df, movements_df, id_column="id", normalize_ids=True)`
+
+One-hop propagation through movements (`origen_id → destination_id`):
+
+| Column | Meaning |
+|---|---|
+| `n_in` / `n_out` | movements received / sent by the plot |
+| `n_indirect_in` | movements **received from** a plot with direct alert |
+| `n_indirect_out` | movements **sent to** a plot with direct alert |
+| `indirect_alert_in` / `indirect_alert_out` | `n_indirect_in > 0` / `n_indirect_out > 0` |
+
+With `normalize_ids=True` (default), IDs are normalised **for matching only**: `1`, `1.0`, `"1"` and `"0001"` are the same plot. This matters because pandas reads an integer ID column with missing values as float. The output `id` keeps the original value.
+
+### `total_risk(direct_df, indirect_df=None, metrics_df=None, id_column="id")`
+
+Joins direct alerts, indirect alerts and spatial metrics into one row per plot.
+
+* Without `indirect_df`, the indirect columns are filled with `"no_info"`.
+* If `direct_df` and `indirect_df` do not share the same IDs, a warning is logged and missing values are filled as **no alert** (`False` / `0`). Missing values are never treated as alerts.
+
+### `alert_enterprise(total_risk_df, movements_df, id_column="id", enterprise_types=None, alert_columns=None, normalize_ids=True)`
+
+Companies (slaughterhouses, cattle fairs, collection centres, …) that exchanged cattle with a farm with any alert.
+
+* `typemove="in"`: alerted farm → company. `typemove="out"`: company → alerted farm.
+* Upper-case SIT column names (`SIT_CODE_ORIGEN`, `TIPO_DESTINO`, `PRODUCER_ID_DESTINO`, …) are renamed automatically.
+* If `tipo_origen`/`tipo_destino` are missing, any ID that is not in `total_risk_df` is considered a company (a warning is logged).
+
+Output: `idpro, id_farm, typemove, enterprise_type, farm_has_direct_alert, farm_has_indirect_alert`.
+
+### `supplier_risk(total_risk_df, suppliers_df, period=None, period_type=None, filter_by_year=False, ...)` and `supplier_risk_summary(df)`
+
+Company risk from formal supplier relations (company ↔ farm), for companies without movement data.
+
+* `supplier_risk` returns one row per relation whose farm has risk (`has_risk, risk_direct, risk_indirect_in, risk_indirect_out, deforested_ha, …`) and keeps extra supplier columns.
+* With `filter_by_year=True`, only relations whose `years` (list, numpy array, comma-separated string or int) overlap the period are kept. Helpers: `get_years_for_period`, `filter_suppliers_by_period`.
+* `supplier_risk_summary` aggregates per company, counting **unique farms** (a relation repeated per year is counted once).
+
+### `calculate_alert(alert_indirect_df, entity_df, provider_df, n_workers=2)` — `ganabosques_risk_package.entity_alert`
+
+Aggregates plot alerts to any entity using a plot → entity mapping (`provider_df`: `plot_id, entity_id`). Accepts the output of `total_risk` or the legacy `plot_alert_indirect` format (see the migration table below).
+
+Output: `entity_id, entity_name, plots_total, plots_alert_direct, plots_alert_in, plots_alert_out, deforested_area_sum, alert`.
 
 ```python
 from ganabosques_risk_package.entity_alert import calculate_alert
-import pandas as pd
 
-df_indirect = pd.read_parquet("outputs/alert_indirect.parquet")
-entity = pd.DataFrame({
-    "id": ["X", "Y", "Z", "W"],
-    "name": ["Region A", "Region B", "Region C", "No Plots"]
-})
-provider = pd.DataFrame({
-    "plot_id": [101, 102, 103, 104, 105],
-    "entity_id": ["X", "X", "Y", "Y", "Z"]
-})
-
-df_entity = calculate_alert(df_indirect, entity, provider, n_workers=4)
-print(df_entity)
+entity = pd.DataFrame({"id": ["X", "Y"], "name": ["Region A", "Region B"]})
+provider = pd.DataFrame({"plot_id": [101, 102, 103], "entity_id": ["X", "X", "Y"]})
+df_entity = calculate_alert(risk, entity, provider)
 ```
 
-# 📁 Package Structure
+---
 
-```bash
+## ⚠️ Deprecated modules and migration
+
+`plot_alert_direct`, `plot_alert_direct_serial` and `plot_alert_indirect` still work but emit a `DeprecationWarning` and will be removed in a future version.
+
+| Legacy | New |
+|---|---|
+| `plot_alert_direct.alert_direct(plots, raster, protected, farming)` | `spatial_metrics(...)` + `alert_direct(plots, raster, metrics_df=...)` |
+| `plot_alert_indirect.alert_indirect(direct_df, movement_df)` | `alert_indirect(direct_df, movements_df)` |
+| `alert_direct`, `deforested_area`, `plot_area` | `direct_alert`, `deforested_ha`, `total_ha` |
+| `alert_in` (plot **sends to** an alerted plot) | `indirect_alert_out` |
+| `alert_out` (plot **receives from** an alerted plot) | `indirect_alert_in` |
+
+> **Note:** "in" and "out" have **opposite meanings** in the two APIs. `calculate_alert` translates them automatically, so its output columns keep their legacy meaning.
+
+---
+
+## 📁 Package structure
+
+```
 ganabosques_risk_package/
-│
-├── plot_alert_direct.py      # Direct deforestation alerts (raster + vector analysis)
-├── plot_alert_indirect.py    # Indirect alerts from origin/destination movements
-├── entity_alert.py           # Generic entity-level aggregation (provider mapping)
-└── tests/                    # Unit tests (unittest)
+├── spatial_metrics.py      # Frontier / protected-area metrics per plot
+├── alert_direct.py         # Direct alerts (deforestation raster)
+├── alert_indirect.py       # Indirect alerts (movement graph)
+├── total_risk.py           # Consolidated risk per plot
+├── alert_enterprise.py     # Company alerts via movements
+├── supplier_risk.py        # Company risk via supplier relations
+├── entity_alert.py         # Aggregation to any entity
+├── _utils.py               # Shared helpers (ID normalisation, booleans, output)
+└── plot_alert_*.py         # Deprecated legacy implementations
+tests/                      # unittest suite + fixtures in tests/data_test
 ```
 
-# ⚙️ Developer Guide
+---
 
-## 🧪 Run Unit Tests
-Run all test cases in the tests/ directory:
+## ⚙️ Developer guide
 
 ```bash
-python -m unittest discover -s tests -v
+pip install -r requirements.txt     # exact environment used in CI
+python -m unittest discover -s tests -t . -v
 ```
 
-Run a specific test file:
+CI (`.github/workflows/ganabosques_risk_package.yml`) runs the full suite on pushes and pull requests to `develop`, `stage` and `main`. Only pushes to `stage`, `main` and `v*` tags merge into `main` and publish a release.
 
-```bash
-python -m unittest tests.test_plot_alert_direct -v
-python -m unittest tests.test_plot_alert_indirect -v
-python -m unittest tests.test_entity_alert -v
-```
+On Windows, the legacy functions with `n_workers > 1` use multiprocessing, so scripts calling them must be protected with `if __name__ == "__main__":`.
 
-# Environment requirements:
+---
 
-geopandas, rasterio, shapely, numpy, pandas, tqdm
-We recommend using pip for installing geospatial dependencies.
+## 📝 License and citation
 
-# 📝 License and Citation
-Authors: Alliance Bioversity International & CIAT (Steven Sotelo and Team)
+Authors: Alliance Bioversity International & CIAT (Steven Sotelo and team)
 Repository: https://github.com/CIAT-DAPA/ganabosques_risk_package
 License: MIT
 
 If you use this package, please cite:
 
-Sotelo, S. (2025). Ganabosques Risk Package: Alert computation for monitoring deforestation and enviromental indicators.
-Alliance Bioversity International & CIAT.
+Sotelo, S. (2025). Ganabosques Risk Package: Alert computation for monitoring deforestation and environmental indicators. Alliance Bioversity International & CIAT.

@@ -20,41 +20,13 @@ Helpers:
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import List, Optional, Set
 
+import numpy as np
 import pandas as pd
 
-
-# ---------------------------------------------------------------------------
-# Utilidades internas
-# ---------------------------------------------------------------------------
-
-def _normalize_id(value) -> str:
-    """Normaliza un ID a string limpio."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    s = str(value).strip()
-    if s.lower() == "nan":
-        return ""
-    if re.match(r"^\d+\.0$", s):
-        s = s[:-2]
-    if re.match(r"^0*\d+$", s):
-        s = str(int(s))
-    return s.upper()
-
-
-def _str_bool(x) -> bool:
-    """Convierte valor a booleano."""
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, str):
-        return x.strip().lower() in ("true", "1", "yes", "y", "si", "sí", "t")
-    try:
-        return bool(x)
-    except Exception:
-        return False
+from ._utils import echo, normalize_id as _normalize_id, str_bool as _str_bool
 
 
 # ---------------------------------------------------------------------------
@@ -135,16 +107,26 @@ def filter_suppliers_by_period(
     if not target_years:
         return suppliers_df.iloc[0:0].copy()
 
-    def _matches(years_val) -> bool:
-        if isinstance(years_val, (list, set, tuple)):
-            return bool(set(int(y) for y in years_val) & target_years)
-        if isinstance(years_val, str):
+    def _to_years(values) -> Set[int]:
+        years = set()
+        for y in values:
             try:
-                parsed = {int(y.strip()) for y in years_val.split(",") if y.strip()}
-                return bool(parsed & target_years)
-            except ValueError:
-                return False
-        if isinstance(years_val, (int, float)) and not pd.isna(years_val):
+                if isinstance(y, str):
+                    y = y.strip()
+                    if not y:
+                        continue
+                years.add(int(float(y)))
+            except (TypeError, ValueError):
+                continue
+        return years
+
+    def _matches(years_val) -> bool:
+        # Listas de parquet/Mongo llegan como numpy arrays o Series
+        if isinstance(years_val, (list, set, tuple, np.ndarray, pd.Series)):
+            return bool(_to_years(years_val) & target_years)
+        if isinstance(years_val, str):
+            return bool(_to_years(years_val.split(",")) & target_years)
+        if isinstance(years_val, (int, float, np.integer, np.floating)) and not pd.isna(years_val):
             return int(years_val) in target_years
         return False
 
@@ -260,7 +242,7 @@ def supplier_risk(
 
     if sups.empty:
         if show_progress:
-            print("⚠️  No hay suppliers que apliquen para este período.")
+            echo("⚠️  No hay suppliers que apliquen para este período.")
         return pd.DataFrame(columns=[
             enterprise_id_column, farm_id_column,
             "has_risk", "risk_direct", "risk_indirect_in", "risk_indirect_out",
@@ -319,7 +301,7 @@ def supplier_risk(
         n_sup = len(sups)
         n_ent = sups[enterprise_id_column].nunique()
         n_farms = sups[farm_id_column].nunique()
-        print(f"🔗 Evaluando riesgo de {n_ent:,} empresas con "
+        echo(f"🔗 Evaluando riesgo de {n_ent:,} empresas con "
               f"{n_farms:,} fincas ({n_sup:,} relaciones)")
 
     # ------------------------------------------------------------------
@@ -338,10 +320,10 @@ def supplier_risk(
         merged = merged.drop(columns=[id_column])
 
     # Rellenar fincas que no estaban en total_risk_df (sin info de riesgo)
-    merged["_has_risk"] = merged["_has_risk"].fillna(False)
-    merged["_risk_direct"] = merged["_risk_direct"].fillna(False)
-    merged["_risk_indirect_in"] = merged["_risk_indirect_in"].fillna(False)
-    merged["_risk_indirect_out"] = merged["_risk_indirect_out"].fillna(False)
+    merged["_has_risk"] = merged["_has_risk"].eq(True)
+    merged["_risk_direct"] = merged["_risk_direct"].eq(True)
+    merged["_risk_indirect_in"] = merged["_risk_indirect_in"].eq(True)
+    merged["_risk_indirect_out"] = merged["_risk_indirect_out"].eq(True)
 
     # Renombrar columnas internas
     merged = merged.rename(columns={
@@ -362,15 +344,15 @@ def supplier_risk(
         n_risky = len(result)
         n_ent_risky = result[enterprise_id_column].nunique() if not result.empty else 0
         n_farms_risky = result[farm_id_column].nunique() if not result.empty else 0
-        print(f"✅ Riesgo por suppliers: {n_risky:,} relaciones con riesgo "
+        echo(f"✅ Riesgo por suppliers: {n_risky:,} relaciones con riesgo "
               f"en {elapsed:.2f}s")
-        print(f"   📊 Empresas con riesgo: {n_ent_risky:,}")
-        print(f"   📊 Fincas con riesgo: {n_farms_risky:,}")
+        echo(f"   📊 Empresas con riesgo: {n_ent_risky:,}")
+        echo(f"   📊 Fincas con riesgo: {n_farms_risky:,}")
         if n_risky > 0:
             n_direct = result["risk_direct"].sum()
             n_ind_in = result["risk_indirect_in"].sum()
             n_ind_out = result["risk_indirect_out"].sum()
-            print(f"   📊 Por tipo — directa: {n_direct:,}, "
+            echo(f"   📊 Por tipo — directa: {n_direct:,}, "
                   f"indirecta IN: {n_ind_in:,}, indirecta OUT: {n_ind_out:,}")
 
     return result.reset_index(drop=True)
@@ -379,8 +361,13 @@ def supplier_risk(
 def supplier_risk_summary(
     supplier_risk_df: pd.DataFrame,
     enterprise_id_column: str = "enterprise_id",
+    farm_id_column: str = "farm_id",
 ) -> pd.DataFrame:
     """Genera resumen agregado por empresa del resultado de ``supplier_risk()``.
+
+    Los conteos son de **fincas únicas** por empresa: si la tabla de suppliers
+    repite una relación empresa-finca (p. ej. una fila por año), la finca se
+    cuenta una sola vez y su área deforestada no se suma dos veces.
 
     Parameters
     ----------
@@ -388,27 +375,47 @@ def supplier_risk_summary(
         Resultado de ``supplier_risk()``.
     enterprise_id_column : str, default "enterprise_id"
         Columna de ID de empresa.
+    farm_id_column : str, default "farm_id"
+        Columna de ID de finca. Si no existe, cada fila cuenta como una finca.
 
     Returns
     -------
     pandas.DataFrame
         Una fila por empresa. Columnas: ``enterprise_id, n_farms_at_risk,
         n_risk_direct, n_risk_indirect_in, n_risk_indirect_out,
-        total_deforested_ha``.
+        total_deforested_ha``. ``total_deforested_ha`` es 0.0 si la entrada no
+        trae ``deforested_ha``.
     """
+    out_cols = [
+        enterprise_id_column, "n_farms_at_risk",
+        "n_risk_direct", "n_risk_indirect_in", "n_risk_indirect_out",
+        "total_deforested_ha",
+    ]
     if supplier_risk_df.empty:
-        return pd.DataFrame(columns=[
-            enterprise_id_column, "n_farms_at_risk",
-            "n_risk_direct", "n_risk_indirect_in", "n_risk_indirect_out",
-            "total_deforested_ha",
-        ])
+        return pd.DataFrame(columns=out_cols)
 
-    agg = supplier_risk_df.groupby(enterprise_id_column).agg(
+    flag_cols = ["has_risk", "risk_direct", "risk_indirect_in", "risk_indirect_out"]
+    df = supplier_risk_df.copy()
+    for c in flag_cols:
+        df[c] = df[c].map(_str_bool).astype(bool) if c in df.columns else False
+    if "deforested_ha" in df.columns:
+        df["deforested_ha"] = pd.to_numeric(df["deforested_ha"], errors="coerce").fillna(0.0)
+    else:
+        df["deforested_ha"] = 0.0
+
+    # Una fila por (empresa, finca): flags con any(), área de la finca una vez
+    if farm_id_column in df.columns:
+        df = df.groupby([enterprise_id_column, farm_id_column], as_index=False).agg(
+            **{c: (c, "any") for c in flag_cols},
+            deforested_ha=("deforested_ha", "max"),
+        )
+
+    agg = df.groupby(enterprise_id_column).agg(
         n_farms_at_risk=("has_risk", "sum"),
         n_risk_direct=("risk_direct", "sum"),
         n_risk_indirect_in=("risk_indirect_in", "sum"),
         n_risk_indirect_out=("risk_indirect_out", "sum"),
-        total_deforested_ha=("deforested_ha", lambda x: x.sum() if "deforested_ha" in supplier_risk_df.columns else 0),
+        total_deforested_ha=("deforested_ha", "sum"),
     ).reset_index()
 
-    return agg.sort_values("n_farms_at_risk", ascending=False).reset_index(drop=True)
+    return agg[out_cols].sort_values("n_farms_at_risk", ascending=False).reset_index(drop=True)
