@@ -7,7 +7,6 @@ cligj==0.7.2
 colorama==0.4.6
 fiona==1.10.1
 geopandas==1.1.1
-mongomock==4.3.0
 numpy==2.2.6
 packaging==25.0
 pandas==2.3.2
@@ -18,7 +17,6 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 rasterio==1.4.3
 rasterstats==0.20.0
-sentinels==1.0.0
 shapely==2.1.1
 simplejson==3.20.2
 six==1.17.0

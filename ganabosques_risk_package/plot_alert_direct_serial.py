@@ -27,6 +27,8 @@ import rasterio
 from shapely.ops import unary_union
 from shapely.geometry import mapping
 from tqdm import tqdm
+
+from ._utils import warn_deprecated
 from rasterstats import zonal_stats
 
 
@@ -97,6 +99,7 @@ def alert_direct_serial(
           - farming_out_proportion
           - alert_direct (bool)
     """
+    warn_deprecated("plot_alert_direct_serial.alert_direct_serial()", "spatial_metrics() + alert_direct() de ganabosques_risk_package")
     if id_column not in plots.columns:
         raise ValueError(f"plots is missing the ID column '{id_column}'")
 

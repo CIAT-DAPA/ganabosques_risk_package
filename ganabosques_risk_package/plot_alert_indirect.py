@@ -13,9 +13,6 @@
 #   - Progress is displayed with tqdm over chunked processing of plot IDs.
 from __future__ import annotations
 
-import warnings
-warnings.filterwarnings("ignore")
-
 from typing import Dict, Tuple, List
 from concurrent.futures import ProcessPoolExecutor
 import math
@@ -23,6 +20,8 @@ import math
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+from ._utils import warn_deprecated
 
 
 # ----------------------------
@@ -208,6 +207,12 @@ def alert_indirect(
         Additionally, for debugging/inspection you may want to also return `new_df`.
         If you need that, we can add an optional flag to return both.
     """
+    warn_deprecated(
+        "plot_alert_indirect.alert_indirect()",
+        "alert_indirect() de ganabosques_risk_package",
+        "Ojo: en la API nueva 'indirect_alert_in' significa que la finca RECIBE de un "
+        "predio con alerta (equivale al 'alert_out' viejo), y viceversa.",
+    )
     _validate_inputs(alert_direct_df, movement_df)
 
     # 1) Build consolidated movement-enriched table with both origin and destination annotations.
