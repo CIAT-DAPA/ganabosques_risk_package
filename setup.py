@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ganabosques_risk_package",
-    version="0.1.0",
+    version="0.0.11",
     description="Package to estimate alert related to deforestation and protected areas using MRV protocol from Colombia",
     author="Steven Sotelo",
     author_email="h.sotelo@cgiar.org",
